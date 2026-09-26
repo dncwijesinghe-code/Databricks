@@ -2,23 +2,19 @@
 # MAGIC %md
 # MAGIC # CSV from Google Drive → Unity Catalog
 # MAGIC
-# MAGIC Config-driven ingestion. Nothing about a particular feed is hard-coded here — a single
-# MAGIC `ingestion_config.json` describes everything, and the `feed` widget picks which one to run.
+# MAGIC Fully config-driven. The notebook holds logic only; every value it uses comes from one of
+# MAGIC two JSON files.
 # MAGIC
-# MAGIC That file has three parts:
+# MAGIC | File | Changes when | Holds |
+# MAGIC |---|---|---|
+# MAGIC | `ingestion_config.json` | a feed is added or changed | `connection`, `defaults`, `feeds` |
+# MAGIC | `runtime_config.json` | rarely | Drive API details, parser fallbacks, metadata catalogue, writer options, naming rules |
 # MAGIC
-# MAGIC | Section | Holds |
-# MAGIC |---|---|
-# MAGIC | `connection` | Drive credentials (by secret reference) and API behaviour |
-# MAGIC | `defaults` | Format, header and validation rules shared by every feed |
-# MAGIC | `feeds` | One block per feed, overriding only what differs |
-# MAGIC
-# MAGIC ### Adding a folder
+# MAGIC ### Adding an ingestion
 # MAGIC
 # MAGIC Add a block under `feeds` with its `folder_id`, how to pick the file, the `columns`, and the
-# MAGIC destination `table`. Nothing in this notebook changes.
-# MAGIC
-# MAGIC Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
+# MAGIC destination `table`. Nothing in this notebook changes, and `runtime_config.json` does not
+# MAGIC either. Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
 # MAGIC `format` untouched.
 # MAGIC
 # MAGIC ### Selecting the source file
@@ -32,10 +28,19 @@
 # MAGIC
 # MAGIC With `strategy: "all"`, every match is ingested in one run. They all append to the feed's
 # MAGIC `destination.table` unless `append_filename_suffix` is set, which gives each file its own
-# MAGIC `<table>_<filename>` table instead.
+# MAGIC `<table><sep><filename>` table instead.
 # MAGIC
 # MAGIC **Credentials are never stored in config.** The `connection.auth` block names a Databricks
 # MAGIC secret scope and key; the service-account JSON itself lives only in that scope.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 0. Load configuration
+# MAGIC
+# MAGIC The package list below is mirrored in `runtime_config.json` for reference, but a `%pip`
+# MAGIC magic runs before any Python does, so it cannot be read from there. It is the one thing
+# MAGIC that has to be edited in two places.
 
 # COMMAND ----------
 
@@ -44,17 +49,14 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("feed", "dataset1", "Feed (key under 'feeds')")
-dbutils.widgets.text("config_file", "ingestion_config.json", "Config file")
-dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "Dry run (skip write)")
-
-FEED = dbutils.widgets.get("feed").strip()
-CONFIG_FILE = dbutils.widgets.get("config_file").strip()
-DRY_RUN = dbutils.widgets.get("dry_run").lower() == "true"
-
-# COMMAND ----------
-
 import json, os, io, re, uuid, fnmatch, copy
+
+# The only path the notebook names itself - everything else is read from the file it points at.
+dbutils.widgets.text("runtime_config_file", "runtime_config.json", "Runtime config file")
+
+
+def resolve_path(name):
+    return name if os.path.exists(name) else os.path.join(os.getcwd(), name)
 
 
 def strip_docs(node):
@@ -64,6 +66,32 @@ def strip_docs(node):
     if isinstance(node, list):
         return [strip_docs(v) for v in node]
     return node
+
+
+def load_json(name):
+    with io.open(resolve_path(name), encoding="utf-8") as fh:
+        return strip_docs(json.load(fh))
+
+
+RUNTIME = load_json(dbutils.widgets.get("runtime_config_file").strip())
+
+W = RUNTIME["widgets"]
+dbutils.widgets.text("feed", W["feed_default"], "Feed (key under 'feeds')")
+dbutils.widgets.text("config_file", W["config_file_default"], "Ingestion config file")
+dbutils.widgets.dropdown("dry_run", W["dry_run_default"], ["true", "false"], "Dry run (skip write)")
+
+FEED = dbutils.widgets.get("feed").strip()
+DRY_RUN = dbutils.widgets.get("dry_run").lower() == "true"
+
+DRIVE_CFG = RUNTIME["drive"]
+PARSER_CFG = RUNTIME["parser"]
+WRITER_CFG = RUNTIME["writer"]
+NAMING_CFG = RUNTIME["table_naming"]
+# Keyed by name for lookup. It is a list in the file because every metadata column name starts
+# with an underscore, and underscore-prefixed *keys* are stripped as documentation on load.
+META_CATALOGUE = {c["name"]: c for c in RUNTIME["metadata_columns"]}
+
+# COMMAND ----------
 
 
 def deep_merge(base, override):
@@ -81,15 +109,12 @@ def deep_merge(base, override):
     return merged
 
 
-path = CONFIG_FILE if os.path.exists(CONFIG_FILE) else os.path.join(os.getcwd(), CONFIG_FILE)
-with io.open(path, encoding="utf-8") as fh:
-    raw = strip_docs(json.load(fh))
+config_path = dbutils.widgets.get("config_file").strip()
+raw = load_json(config_path)
 
 feeds = raw.get("feeds") or {}
 if FEED not in feeds:
-    raise ValueError(
-        "Unknown feed {!r}. Defined feeds: {}".format(FEED, sorted(feeds) or "none")
-    )
+    raise ValueError("Unknown feed {!r}. Defined feeds: {}".format(FEED, sorted(feeds) or "none"))
 
 defaults = raw.get("defaults") or {}
 feed_cfg = feeds[FEED]
@@ -103,9 +128,19 @@ if not destination.get("table"):
 if not source.get("columns"):
     raise ValueError("Feed {!r} must set source.columns.".format(FEED))
 
-print("Config : {}".format(os.path.abspath(path)))
-print("Feed   : {}".format(FEED))
-print("Target : {}.{}.{}".format(destination["catalog"], destination["schema"], destination["table"]))
+# Anything a feed leaves unset falls back to runtime_config rather than to a literal in the code.
+fmt = deep_merge(PARSER_CFG["fallbacks"], source.get("format"))
+hdr = deep_merge(PARSER_CFG["fallbacks"], source.get("header"))
+rules = deep_merge(RUNTIME["validation_fallbacks"], source.get("validation"))
+api = deep_merge(DRIVE_CFG["fallbacks"], connection.get("api"))
+
+declared = source["columns"]
+declared_names = [c["name"] for c in declared]
+
+print("Runtime : {}".format(resolve_path(dbutils.widgets.get("runtime_config_file").strip())))
+print("Config  : {}".format(resolve_path(config_path)))
+print("Feed    : {}".format(FEED))
+print("Target  : {}.{}.{}".format(destination["catalog"], destination["schema"], destination["table"]))
 
 # COMMAND ----------
 
@@ -118,22 +153,29 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 auth = connection["auth"]
-if auth.get("method") != "service_account":
+if auth.get("method") != DRIVE_CFG["auth_method"]:
     raise NotImplementedError(
-        "Only service_account auth is implemented, got {!r}".format(auth.get("method"))
+        "Only {!r} auth is implemented, got {!r}".format(DRIVE_CFG["auth_method"], auth.get("method"))
     )
 
 # The key is read from the secret scope. It is never printed and never written to disk.
 sa_json = dbutils.secrets.get(scope=auth["secret_scope"], key=auth["secret_key"])
 
 credentials = service_account.Credentials.from_service_account_info(
-    json.loads(sa_json),
-    scopes=connection["api"]["scopes"],
+    json.loads(sa_json), scopes=api["scopes"]
 )
-drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+drive = build(
+    DRIVE_CFG["api_name"], DRIVE_CFG["api_version"], credentials=credentials, cache_discovery=False
+)
 print("Authenticated as:", auth.get("service_account_email", "(email not recorded in config)"))
 
-FILE_FIELDS = "id, name, mimeType, size, modifiedTime"
+FILE_FIELDS = ", ".join(DRIVE_CFG["file_fields"])
+MIME = DRIVE_CFG["mime_types"]
+QUERIES = DRIVE_CFG["queries"]
+SHARED_DRIVE_ARGS = {
+    "supportsAllDrives": DRIVE_CFG["support_all_drives"],
+    "includeItemsFromAllDrives": DRIVE_CFG["include_items_from_all_drives"],
+}
 
 # COMMAND ----------
 
@@ -162,17 +204,16 @@ def list_folder(folder_id, recursive=False):
             response = (
                 drive.files()
                 .list(
-                    q="'{}' in parents and trashed = false".format(current),
+                    q=QUERIES["children_of_folder"].format(folder_id=current),
                     fields="nextPageToken, files({})".format(FILE_FIELDS),
-                    pageSize=1000,
+                    pageSize=DRIVE_CFG["page_size"],
                     pageToken=page_token,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
+                    **SHARED_DRIVE_ARGS
                 )
                 .execute()
             )
             for entry in response.get("files", []):
-                if entry["mimeType"] == "application/vnd.google-apps.folder":
+                if entry["mimeType"] == MIME["folder"]:
                     if recursive:
                         pending.append(entry["id"])
                 else:
@@ -189,18 +230,22 @@ def resolve_files(file_cfg):
     """Return the list of Drive files to ingest, in the precedence order documented above."""
     file_id = (file_cfg.get("file_id") or "").strip()
     if file_id:
-        meta = drive.files().get(fileId=file_id, fields=FILE_FIELDS, supportsAllDrives=True).execute()
-        return [meta]
+        return [
+            drive.files()
+            .get(fileId=file_id, fields=FILE_FIELDS, supportsAllDrives=DRIVE_CFG["support_all_drives"])
+            .execute()
+        ]
 
     folder_id = (file_cfg.get("folder_id") or "").strip()
     match = file_cfg.get("match") or {}
 
     if match.get("enabled"):
         if not folder_id:
-            raise ValueError("match mode needs source_config.file.folder_id.")
+            raise ValueError("match mode needs source.file.folder_id.")
         pattern = match.get("pattern") or "*"
         candidates = [
-            f for f in list_folder(folder_id, recursive=bool(match.get("recursive")))
+            f
+            for f in list_folder(folder_id, recursive=bool(match.get("recursive")))
             if fnmatch.fnmatch(f["name"], pattern)
         ]
         if not candidates:
@@ -227,20 +272,15 @@ def resolve_files(file_cfg):
 
     name = (file_cfg.get("file_name") or "").strip()
     if not name:
-        raise ValueError("source_config.file needs file_id, file_name, or match.enabled with a pattern.")
+        raise ValueError("source.file needs file_id, file_name, or match.enabled with a pattern.")
 
-    query = "name = '{}' and trashed = false".format(name)
+    query = QUERIES["by_name"].format(name=name)
     if folder_id:
-        query += " and '{}' in parents".format(folder_id)
+        query += QUERIES["parent_clause"].format(folder_id=folder_id)
 
     matches = (
         drive.files()
-        .list(
-            q=query,
-            fields="files({})".format(FILE_FIELDS),
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        )
+        .list(q=query, fields="files({})".format(FILE_FIELDS), **SHARED_DRIVE_ARGS)
         .execute()
         .get("files", [])
     )
@@ -277,57 +317,52 @@ import pandas as pd
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType
 
-fmt = source["format"]
-hdr = source["header"]
-declared = source["columns"]
-declared_names = [c["name"] for c in declared]
-rules = source.get("validation", {})
-
 
 def download(meta):
     """Bytes for a Drive file. A native Google Sheet must be exported rather than downloaded."""
-    if meta["mimeType"] == "application/vnd.google-apps.spreadsheet":
-        request = drive.files().export_media(fileId=meta["id"], mimeType="text/csv")
+    if meta["mimeType"] == MIME["google_sheet"]:
+        request = drive.files().export_media(fileId=meta["id"], mimeType=MIME["sheet_export_as"])
     else:
-        request = drive.files().get_media(fileId=meta["id"], supportsAllDrives=True)
+        request = drive.files().get_media(
+            fileId=meta["id"], supportsAllDrives=DRIVE_CFG["support_all_drives"]
+        )
 
     buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(
-        buffer, request, chunksize=connection["api"].get("chunk_size_bytes", 10 * 1024 * 1024)
-    )
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=api["chunk_size_bytes"])
     done = False
     while not done:
-        _, done = downloader.next_chunk(num_retries=connection["api"].get("max_retries", 3))
+        _, done = downloader.next_chunk(num_retries=api["max_retries"])
     return buffer.getvalue()
 
 
 def parse(raw_bytes):
     """Parse to a DataFrame of strings. Type inference is deliberately avoided - see below."""
     read_args = dict(
-        sep=fmt.get("delimiter", ","),
-        encoding=fmt.get("encoding", "utf-8"),
-        quotechar=fmt.get("quote_char", '"'),
-        dtype=str,
+        sep=fmt["delimiter"],
+        encoding=fmt["encoding"],
+        quotechar=fmt["quote_char"],
+        dtype=str,  # no type inference
         keep_default_na=False,
-        na_values=fmt.get("null_values", [""]),
-        skipinitialspace=bool(fmt.get("trim_whitespace", True)),
+        na_values=fmt["null_values"],
+        skipinitialspace=bool(fmt["trim_whitespace"]),
     )
     if fmt.get("escape_char"):
         read_args["escapechar"] = fmt["escape_char"]
 
-    if hdr.get("has_header", True):
-        read_args["header"] = int(hdr.get("header_row_number", 1)) - 1  # config is 1-based
+    if hdr["has_header"]:
+        offset = 1 if PARSER_CFG["header_row_is_one_based"] else 0
+        read_args["header"] = int(hdr["header_row_number"]) - offset
     else:
         read_args["header"] = None
         read_args["names"] = declared_names
 
     pdf = pd.read_csv(io.BytesIO(raw_bytes), **read_args)
 
-    skip_after = int(hdr.get("skip_rows_after_header", 0))
+    skip_after = int(hdr["skip_rows_after_header"])
     if skip_after:
         pdf = pdf.iloc[skip_after:]
 
-    if fmt.get("trim_whitespace", True):
+    if fmt["trim_whitespace"]:
         for col in pdf.columns:
             if pdf[col].dtype == object:
                 pdf[col] = pdf[col].str.strip()
@@ -339,14 +374,14 @@ def validate_columns(pdf, file_name):
     missing = [c for c in declared_names if c not in found]
     extra = [c for c in found if c not in declared_names]
 
-    if missing and rules.get("fail_on_missing_columns", True):
+    if missing and rules["fail_on_missing_columns"]:
         raise ValueError("{}: declared columns absent from the CSV: {}".format(file_name, missing))
-    if extra and rules.get("fail_on_extra_columns", False):
+    if extra and rules["fail_on_extra_columns"]:
         raise ValueError("{}: undeclared columns present: {}".format(file_name, extra))
     if extra:
         print("    ignoring {} undeclared column(s): {}".format(len(extra), extra))
 
-    if rules.get("enforce_column_list", True):
+    if rules["enforce_column_list"]:
         pdf = pdf[[c for c in declared_names if c in found]]
     return pdf
 
@@ -356,12 +391,22 @@ def to_spark(pdf, file_name):
     string_schema = StructType([StructField(c, StringType(), True) for c in pdf.columns])
     df = spark.createDataFrame(pdf.astype(object).where(pd.notnull(pdf), None), schema=string_schema)
 
+    temporal = [t.lower() for t in PARSER_CFG["temporal_types"]]
+    # Which Spark function parses which type is logic, not configuration - but keyed by name
+    # rather than by position, so reordering temporal_types cannot silently swap them.
+    converters = {"date": F.to_date, "timestamp": F.to_timestamp}
+
     for col in declared:
         name, dtype = col["name"], col["type"]
         if name not in df.columns:
             continue
-        if dtype.lower() in ("date", "timestamp") and col.get("format"):
-            conv = F.to_date if dtype.lower() == "date" else F.to_timestamp
+        if dtype.lower() in temporal and col.get("format"):
+            conv = converters.get(dtype.lower())
+            if conv is None:
+                raise ValueError(
+                    "runtime_config lists {!r} as a temporal type but this notebook has no "
+                    "parser for it. Known: {}.".format(dtype, sorted(converters))
+                )
             df = df.withColumn(name, conv(F.col(name), col["format"]))
         else:
             df = df.withColumn(name, F.col(name).cast(dtype))
@@ -384,7 +429,7 @@ def check_primary_key(df, file_name):
     if not pk:
         return df
 
-    if rules.get("fail_on_null_primary_key", True):
+    if rules["fail_on_null_primary_key"]:
         null_pk = df.filter(" OR ".join("`{}` IS NULL".format(c) for c in pk)).count()
         if null_pk:
             raise ValueError("{}: {} row(s) have a NULL primary key {}.".format(file_name, null_pk, pk))
@@ -392,10 +437,10 @@ def check_primary_key(df, file_name):
     total = df.count()
     dupes = total - df.select(*pk).distinct().count()
     if dupes:
-        if rules.get("deduplicate_on_primary_key", False):
+        if rules["deduplicate_on_primary_key"]:
             df = df.dropDuplicates(pk)
             print("    removed {} duplicate row(s) on {}".format(dupes, pk))
-        elif rules.get("enforce_primary_key_unique", True):
+        elif rules["enforce_primary_key_unique"]:
             raise ValueError(
                 "{}: {} duplicate value(s) for primary key {}. Set "
                 "validation.deduplicate_on_primary_key to true to drop them.".format(
@@ -405,30 +450,54 @@ def check_primary_key(df, file_name):
     return df
 
 
-def check_table_schema(df, file_name):
-    """Assert the DataFrame matches destination.table_schema, when one is declared.
+def selected_metadata():
+    """The metadata columns this feed wants, as (name, spec) from the runtime catalogue."""
+    if not destination.get("add_ingestion_metadata", True):
+        return []
+    chosen = []
+    for name in destination.get("metadata_columns", []):
+        spec = META_CATALOGUE.get(name)
+        if spec is None:
+            raise ValueError(
+                "destination.metadata_columns names {!r}, which is not in "
+                "runtime_config.metadata_columns.".format(name)
+            )
+        chosen.append((name, spec))
+    return chosen
 
-    source_config and destination_config each describe part of the shape, so they can drift
-    apart. Catching that here means a mismatch fails the run rather than quietly creating a
-    table shaped differently from what the config claims.
+
+def add_metadata(df, meta, batch_id):
+    """Attach the selected metadata columns, each built from its declared 'value' kind."""
+    producers = {
+        "batch_id": lambda: F.lit(batch_id),
+        "current_timestamp": F.current_timestamp,
+        "source_file_name": lambda: F.lit(meta["name"]),
+        "source_file_id": lambda: F.lit(meta["id"]),
+    }
+    for name, spec in selected_metadata():
+        kind = spec["value"]
+        if kind not in producers:
+            raise ValueError(
+                "Metadata column {!r} declares value {!r}, which this notebook cannot "
+                "produce. Known kinds: {}.".format(name, kind, sorted(producers))
+            )
+        df = df.withColumn(name, producers[kind]())
+    return df
+
+
+def check_table_schema(df, file_name):
+    """Assert the built DataFrame matches the declared shape.
+
+    With a single config file the schema has no second copy to drift out of step with, so this
+    checks the DataFrame against source.columns plus the selected metadata rather than
+    reconciling two files. An explicit destination.table_schema still overrides.
     """
     expected = destination.get("table_schema")
     if not expected:
-        # Derive it: source columns, then metadata. Because there is only one config file, the
-        # schema has no second copy to drift out of step with - this now checks the built
-        # DataFrame against the declared columns rather than reconciling two files.
-        metadata_types = {
-            "_batch_id": "string",
-            "_ingested_at": "timestamp",
-            "_source_file_name": "string",
-            "_source_file_id": "string",
-        }
-        expected = list(declared)
-        if destination.get("add_ingestion_metadata", True):
-            expected = expected + [
-                {"name": c, "type": metadata_types.get(c, "string"), "nullable": False}
-                for c in destination.get("metadata_columns", [])
-            ]
+        expected = list(declared) + [
+            {"name": name, "type": spec["type"], "nullable": spec.get("nullable", False)}
+            for name, spec in selected_metadata()
+        ]
 
     actual = {f.name: f.dataType.simpleString() for f in df.schema.fields}
     expected_names = [c["name"] for c in expected]
@@ -437,8 +506,8 @@ def check_table_schema(df, file_name):
     extra = [n for n in actual if n not in expected_names]
     if missing or extra:
         raise ValueError(
-            "{}: table_schema does not match the data. Missing {}, unexpected {}. "
-            "Reconcile destination_config.table_schema with source_config.columns.".format(
+            "{}: the built data does not match the declared schema. Missing {}, unexpected {}. "
+            "Reconcile source.columns and destination.metadata_columns.".format(
                 file_name, missing or "none", extra or "none"
             )
         )
@@ -459,34 +528,30 @@ def resolve_table(file_name):
         return table
 
     stem = os.path.splitext(file_name)[0]
-    slug = re.sub(r"_+", "_", re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_")).lower()
+    slug = re.sub(NAMING_CFG["non_alphanumeric_pattern"], "_", stem).strip("_")
+    slug = re.sub(NAMING_CFG["collapse_underscores_pattern"], "_", slug)
+    if NAMING_CFG["lowercase"]:
+        slug = slug.lower()
     if not slug:
         raise ValueError("Cannot derive a table suffix from {!r}.".format(file_name))
-    return "{}_{}".format(table, slug)
+    if slug[0].isdigit():
+        slug = NAMING_CFG["digit_prefix"] + slug
+    return "{}{}{}".format(table, NAMING_CFG["suffix_separator"], slug)
 
 
 def ingest(meta):
     """Download, parse, validate and write one Drive file. Returns a summary dict."""
     print("  {}".format(meta["name"]))
-    raw = download(meta)
-    pdf = parse(raw)
-    pdf = validate_columns(pdf, meta["name"])
-    df = to_spark(pdf, meta["name"])
-    df = check_primary_key(df, meta["name"])
+    pdf = validate_columns(parse(download(meta)), meta["name"])
+    df = check_primary_key(to_spark(pdf, meta["name"]), meta["name"])
 
     batch_id = str(uuid.uuid4())
-    if destination.get("add_ingestion_metadata", True):
-        df = (
-            df.withColumn("_batch_id", F.lit(batch_id))
-            .withColumn("_ingested_at", F.current_timestamp())
-            .withColumn("_source_file_name", F.lit(meta["name"]))
-            .withColumn("_source_file_id", F.lit(meta["id"]))
-        )
-
+    df = add_metadata(df, meta, batch_id)
     check_table_schema(df, meta["name"])
 
-    table = resolve_table(meta["name"])
-    fqn = "{}.{}.{}".format(destination["catalog"], destination["schema"], table)
+    fqn = "{}.{}.{}".format(
+        destination["catalog"], destination["schema"], resolve_table(meta["name"])
+    )
     rows = df.count()
 
     if DRY_RUN:
@@ -495,15 +560,17 @@ def ingest(meta):
 
     if destination.get("create_if_not_exists", True):
         spark.sql(
-            "CREATE SCHEMA IF NOT EXISTS {}.{}".format(destination["catalog"], destination["schema"])
+            WRITER_CFG["create_schema_sql"].format(
+                catalog=destination["catalog"], schema=destination["schema"]
+            )
         )
 
     existed = spark.catalog.tableExists(fqn)
-    writer = (
-        df.write.format("delta")
-        .mode(destination.get("write_mode", "append"))
-        .option("mergeSchema", "false")
+    writer = df.write.format(WRITER_CFG["format"]).mode(
+        destination.get("write_mode", WRITER_CFG["fallback_write_mode"])
     )
+    for key, value in (WRITER_CFG.get("options") or {}).items():
+        writer = writer.option(key, value)
     if destination.get("partition_by"):
         writer = writer.partitionBy(*destination["partition_by"])
     for key, value in (destination.get("table_properties") or {}).items():
@@ -520,9 +587,7 @@ def ingest(meta):
 
 # COMMAND ----------
 
-results = []
-for meta in files_to_ingest:
-    results.append(ingest(meta))
+results = [ingest(meta) for meta in files_to_ingest]
 
 print()
 print("{} file(s), {:,} row(s) total".format(len(results), sum(r["rows"] for r in results)))
@@ -534,21 +599,29 @@ display(spark.createDataFrame(pd.DataFrame(results)))
 
 # COMMAND ----------
 
-if not DRY_RUN:
+
+def metadata_named(value_kind):
+    """Find the selected metadata column that carries a given kind, for the verify query."""
+    for name, spec in selected_metadata():
+        if spec["value"] == value_kind:
+            return name
+    return None
+
+
+batch_col = metadata_named("batch_id")
+file_col = metadata_named("source_file_name")
+time_col = metadata_named("current_timestamp")
+
+if not DRY_RUN and all([batch_col, file_col, time_col]):
     for fqn in sorted({r["table"] for r in results}):
         print(fqn)
         display(
             spark.sql(
-                """
-            SELECT _batch_id,
-                   _source_file_name,
-                   MIN(_ingested_at) AS ingested_at,
-                   COUNT(*)          AS row_count
-            FROM {}
-            GROUP BY _batch_id, _source_file_name
-            ORDER BY ingested_at DESC
-        """.format(
-                    fqn
+                RUNTIME["verify_query"].format(
+                    table=fqn, batch_col=batch_col, file_col=file_col, time_col=time_col
                 )
             )
         )
+elif not DRY_RUN:
+    print("Skipped: the verify query needs batch_id, source_file_name and current_timestamp "
+          "metadata columns, and this feed does not select all three.")
