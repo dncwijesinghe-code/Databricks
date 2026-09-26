@@ -1,23 +1,25 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # CSV from Google Drive → `dataplatform_dev.bronze_dev.ef_csv_<filename>`
+# MAGIC # CSV from Google Drive → Unity Catalog
 # MAGIC
-# MAGIC Config-driven ingestion. Nothing about a particular feed is hard-coded here — three JSON
-# MAGIC files describe the connection, the source file and the destination.
+# MAGIC Config-driven ingestion. Nothing about a particular feed is hard-coded here — a single
+# MAGIC `ingestion_config.json` describes everything, and the `feed` widget picks which one to run.
 # MAGIC
-# MAGIC One directory per feed under `configs/`, selected by the `config_dir` widget, so the same
-# MAGIC notebook serves every feed:
+# MAGIC That file has three parts:
 # MAGIC
-# MAGIC | `config_dir` | Feed |
+# MAGIC | Section | Holds |
 # MAGIC |---|---|
-# MAGIC | `configs/dataset1` | `Dataset1.csv`, resolved by name within its shared folder |
-# MAGIC | `configs/file_daily` | `file<YYYYMMDD>.csv`, newest match by glob, one table per drop |
+# MAGIC | `connection` | Drive credentials (by secret reference) and API behaviour |
+# MAGIC | `defaults` | Format, header and validation rules shared by every feed |
+# MAGIC | `feeds` | One block per feed, overriding only what differs |
 # MAGIC
-# MAGIC | File | Holds |
-# MAGIC |---|---|
-# MAGIC | `connection_config.json` | Drive credentials (by secret reference) and API behaviour |
-# MAGIC | `source_config.json` | File selection, delimiter, header rules, column list, primary key |
-# MAGIC | `destination_config.json` | Catalog, schema, table naming, write mode, table schema |
+# MAGIC ### Adding a folder
+# MAGIC
+# MAGIC Add a block under `feeds` with its `folder_id`, how to pick the file, the `columns`, and the
+# MAGIC destination `table`. Nothing in this notebook changes.
+# MAGIC
+# MAGIC Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
+# MAGIC `format` untouched.
 # MAGIC
 # MAGIC ### Selecting the source file
 # MAGIC
@@ -28,11 +30,11 @@
 # MAGIC    of them. Use this for a drop-folder where filenames vary.
 # MAGIC 3. **`file_name`** — a literal name, optionally scoped to `folder_id`.
 # MAGIC
-# MAGIC With `strategy: "all"`, each file lands in its own `ef_csv_<filename>` table — unless
-# MAGIC `table_name_override` is set in the destination config, in which case every file appends
-# MAGIC to that one table.
+# MAGIC With `strategy: "all"`, every match is ingested in one run. They all append to the feed's
+# MAGIC `destination.table` unless `append_filename_suffix` is set, which gives each file its own
+# MAGIC `<table>_<filename>` table instead.
 # MAGIC
-# MAGIC **Credentials are never stored in config.** `connection_config.json` names a Databricks
+# MAGIC **Credentials are never stored in config.** The `connection.auth` block names a Databricks
 # MAGIC secret scope and key; the service-account JSON itself lives only in that scope.
 
 # COMMAND ----------
@@ -42,35 +44,68 @@
 
 # COMMAND ----------
 
-# One config directory per feed, under configs/. Point config_dir at the feed to run:
-#   configs/dataset1    - Dataset1.csv, resolved by name within its shared folder
-#   configs/file_daily  - date-stamped daily drop, resolved by glob
-dbutils.widgets.text("config_dir", "configs/dataset1", "Config directory")
+dbutils.widgets.text("feed", "dataset1", "Feed (key under 'feeds')")
+dbutils.widgets.text("config_file", "ingestion_config.json", "Config file")
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "Dry run (skip write)")
 
-CONFIG_DIR = dbutils.widgets.get("config_dir")
+FEED = dbutils.widgets.get("feed").strip()
+CONFIG_FILE = dbutils.widgets.get("config_file").strip()
 DRY_RUN = dbutils.widgets.get("dry_run").lower() == "true"
 
 # COMMAND ----------
 
-import json, os, io, re, uuid, fnmatch
+import json, os, io, re, uuid, fnmatch, copy
 
 
-def load_config(name):
-    path = os.path.join(CONFIG_DIR, name)
-    if not os.path.exists(path):  # fall back to a path relative to the notebook
-        path = os.path.join(os.getcwd(), CONFIG_DIR, name)
-    with io.open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-    # Keys beginning with "_" are documentation for whoever edits the file, not settings.
-    return {k: v for k, v in cfg.items() if not k.startswith("_")}
+def strip_docs(node):
+    """Drop keys beginning with '_' - they document the file for whoever edits it."""
+    if isinstance(node, dict):
+        return {k: strip_docs(v) for k, v in node.items() if not k.startswith("_")}
+    if isinstance(node, list):
+        return [strip_docs(v) for v in node]
+    return node
 
 
-connection = load_config("connection_config.json")
-source = load_config("source_config.json")
-destination = load_config("destination_config.json")
+def deep_merge(base, override):
+    """Recursive merge so a feed can override one nested key and inherit the rest.
 
-print("Configs loaded from:", os.path.abspath(CONFIG_DIR))
+    Lists replace rather than concatenate: a feed's 'columns' is its whole column list, and
+    appending to an inherited list is never what you want here.
+    """
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+path = CONFIG_FILE if os.path.exists(CONFIG_FILE) else os.path.join(os.getcwd(), CONFIG_FILE)
+with io.open(path, encoding="utf-8") as fh:
+    raw = strip_docs(json.load(fh))
+
+feeds = raw.get("feeds") or {}
+if FEED not in feeds:
+    raise ValueError(
+        "Unknown feed {!r}. Defined feeds: {}".format(FEED, sorted(feeds) or "none")
+    )
+
+defaults = raw.get("defaults") or {}
+feed_cfg = feeds[FEED]
+
+connection = raw["connection"]
+source = deep_merge(defaults.get("source") or {}, feed_cfg.get("source"))
+destination = deep_merge(defaults.get("destination") or {}, feed_cfg.get("destination"))
+
+if not destination.get("table"):
+    raise ValueError("Feed {!r} must set destination.table.".format(FEED))
+if not source.get("columns"):
+    raise ValueError("Feed {!r} must set source.columns.".format(FEED))
+
+print("Config : {}".format(os.path.abspath(path)))
+print("Feed   : {}".format(FEED))
+print("Target : {}.{}.{}".format(destination["catalog"], destination["schema"], destination["table"]))
 
 # COMMAND ----------
 
@@ -379,7 +414,21 @@ def check_table_schema(df, file_name):
     """
     expected = destination.get("table_schema")
     if not expected:
-        return  # null means "derive from the source" - nothing to check against
+        # Derive it: source columns, then metadata. Because there is only one config file, the
+        # schema has no second copy to drift out of step with - this now checks the built
+        # DataFrame against the declared columns rather than reconciling two files.
+        metadata_types = {
+            "_batch_id": "string",
+            "_ingested_at": "timestamp",
+            "_source_file_name": "string",
+            "_source_file_id": "string",
+        }
+        expected = list(declared)
+        if destination.get("add_ingestion_metadata", True):
+            expected = expected + [
+                {"name": c, "type": metadata_types.get(c, "string"), "nullable": False}
+                for c in destination.get("metadata_columns", [])
+            ]
 
     actual = {f.name: f.dataType.simpleString() for f in df.schema.fields}
     expected_names = [c["name"] for c in expected]
@@ -403,15 +452,17 @@ def check_table_schema(df, file_name):
         raise ValueError("{}: type mismatch - {}".format(file_name, "; ".join(wrong)))
 
 
-def table_name_from_file(file_name, prefix):
+def resolve_table(file_name):
+    """The configured table name, optionally suffixed with the filename for per-drop tables."""
+    table = destination["table"]
+    if not destination.get("append_filename_suffix"):
+        return table
+
     stem = os.path.splitext(file_name)[0]
-    slug = re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_").lower()
-    slug = re.sub(r"_+", "_", slug)
+    slug = re.sub(r"_+", "_", re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_")).lower()
     if not slug:
-        raise ValueError("Cannot derive a table name from {!r}.".format(file_name))
-    if slug[0].isdigit():
-        slug = "t_" + slug  # an identifier cannot start with a digit
-    return prefix + slug
+        raise ValueError("Cannot derive a table suffix from {!r}.".format(file_name))
+    return "{}_{}".format(table, slug)
 
 
 def ingest(meta):
@@ -434,9 +485,7 @@ def ingest(meta):
 
     check_table_schema(df, meta["name"])
 
-    table = destination.get("table_name_override") or table_name_from_file(
-        meta["name"], destination.get("table_name_prefix", "ef_csv_")
-    )
+    table = resolve_table(meta["name"])
     fqn = "{}.{}.{}".format(destination["catalog"], destination["schema"], table)
     rows = df.count()
 

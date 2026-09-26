@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "_about": "One file per ingestion project. 'connection' and 'defaults' are shared; each entry under 'feeds' overrides only what differs. Adding a folder means adding a feed block - no notebook changes. Run the notebook with the feed widget set to a key under 'feeds'.",
+
+  "connection": {
+    "provider": "google_drive",
+    "auth": {
+      "method": "service_account",
+      "secret_scope": "gdrive",
+      "secret_key": "service_account_json",
+      "service_account_email": "databricksserviceaccount@databricksingestion-509802.iam.gserviceaccount.com",
+      "_note": "The key itself lives in the Databricks secret scope above and is never stored here. Share each Drive folder with service_account_email, or lookups return 404."
+    },
+    "api": {
+      "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+      "timeout_seconds": 120,
+      "max_retries": 3,
+      "chunk_size_bytes": 10485760
+    }
+  },
+
+  "defaults": {
+    "_about": "Applied to every feed, then overridden per feed. Merging is recursive, so a feed can override a single nested key such as format.quote_char without repeating the rest.",
+
+    "source": {
+      "source_type": "csv",
+      "file": {
+        "file_id": "",
+        "file_name": "",
+        "folder_id": "",
+        "match": {
+          "enabled": false,
+          "pattern": "*.csv",
+          "strategy": "newest",
+          "recursive": false,
+          "min_modified_time": null
+        }
+      },
+      "format": {
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "quote_char": "\"",
+        "escape_char": null,
+        "null_values": ["", "NA", "N/A", "NULL", "null"],
+        "trim_whitespace": true
+      },
+      "header": {
+        "has_header": true,
+        "header_row_number": 1,
+        "skip_rows_after_header": 0
+      },
+      "validation": {
+        "enforce_column_list": true,
+        "fail_on_missing_columns": true,
+        "fail_on_extra_columns": false,
+        "enforce_primary_key_unique": true,
+        "deduplicate_on_primary_key": false,
+        "fail_on_null_primary_key": true
+      }
+    },
+
+    "destination": {
+      "catalog": "dataplatform_dev",
+      "schema": "bronze_dev",
+      "table": null,
+      "append_filename_suffix": false,
+      "write_mode": "append",
+      "create_if_not_exists": true,
+      "add_ingestion_metadata": true,
+      "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
+      "partition_by": [],
+      "table_properties": {
+        "delta.autoOptimize.optimizeWrite": "true"
+      },
+      "table_schema": null,
+      "_table_note": "'table' is the bare table name and is required per feed. Set append_filename_suffix true to get one table per file, named <table>_<filename slug>. 'table_schema' null means derive it from columns plus metadata_columns - there is no second copy of the schema to drift out of step."
+    }
+  },
+
+  "feeds": {
+    "dataset1": {
+      "description": "Dataset1.csv in a shared folder, resolved by exact name.",
+      "source": {
+        "file": {
+          "file_name": "Dataset1.csv",
+          "folder_id": "1qsypOaPkJEy6QvrO21WPsi1xFhnxUW4r"
+        },
+        "columns": [
+          { "name": "AAA", "type": "bigint", "nullable": false },
+          { "name": "BBB", "type": "bigint", "nullable": true },
+          { "name": "CCC", "type": "bigint", "nullable": true }
+        ],
+        "primary_key": ["AAA"]
+      },
+      "destination": {
+        "table": "Table01"
+      }
+    },
+
+    "file_daily": {
+      "description": "Date-stamped daily drop, e.g. file20260926.csv. All drops accumulate in one table.",
+      "source": {
+        "file": {
+          "folder_id": "1V6AmKhu4illJyUNXqcEeCE47gHQNj12O",
+          "match": {
+            "enabled": true,
+            "pattern": "file*.csv",
+            "strategy": "newest"
+          }
+        },
+        "format": {
+          "quote_char": "'",
+          "_quote_note": "This source quotes only its non-numeric field (DDD arrives as 'A'), as a QUOTE_NONNUMERIC-style export does. With the default double quote the apostrophes would be kept and DDD would store the literal 'A'."
+        },
+        "columns": [
+          { "name": "AAA", "type": "bigint", "nullable": false },
+          { "name": "BBB", "type": "bigint", "nullable": true },
+          { "name": "CCC", "type": "bigint", "nullable": true },
+          { "name": "DDD", "type": "string", "nullable": true }
+        ],
+        "primary_key": ["AAA"]
+      },
+      "destination": {
+        "table": "Table02",
+        "_pk_note": "AAA is unique within one drop but repeats across drops, and every drop now lands in this one table. enforce_primary_key_unique therefore checks each drop in isolation, not the table as a whole - a cross-drop uniqueness guarantee would need a MERGE in silver."
+      }
+    }
+  }
+}
