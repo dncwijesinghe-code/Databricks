@@ -51,16 +51,23 @@
 # MAGIC
 # MAGIC ### Adding an ingestion
 # MAGIC
-# MAGIC Add a block under `feeds` in **both** `source_config.json` (folder, how to pick the file,
-# MAGIC `columns`) and `destination_config.json` (`table`), using the same feed key. If it reuses an
-# MAGIC existing source and destination, the inherited `connection` defaults already point at them
-# MAGIC and nothing else changes.
+# MAGIC Add a block under `feeds` in **both** `source_config.json` and `destination_config.json`,
+# MAGIC using the same feed key.
+# MAGIC
+# MAGIC In `source_config.json` each feed is **self-contained** — it states its connection, file
+# MAGIC selection, format, header, validation, columns and primary key in full, with no shared
+# MAGIC `defaults` block to consult. Copy an existing feed and change what differs. The cost is
+# MAGIC duplication: a change meant for every feed has to be made in each one.
+# MAGIC
+# MAGIC `destination_config.json` does still carry `defaults`, so a feed there usually needs only
+# MAGIC its `table` and `load_type`.
 # MAGIC
 # MAGIC The notebook warns when a feed key exists in one file but not the other, and fails with a
 # MAGIC message naming the missing side if the selected feed is half-defined.
 # MAGIC
-# MAGIC Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
-# MAGIC `format` untouched.
+# MAGIC Merging remains recursive wherever it still applies — `destination_config` defaults, the
+# MAGIC `runtime_config.json` fallbacks, and `file_overrides` — so a partial block overrides only the
+# MAGIC keys it names.
 # MAGIC
 # MAGIC ### Selecting the source file
 # MAGIC

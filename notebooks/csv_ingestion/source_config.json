@@ -1,87 +1,119 @@
 {
   "version": 1,
-  "_about": "Which file each feed reads and how to parse it. The connection itself lives in connection_config.json and is referenced by name, so feeds sharing a source do not repeat it. Every feed key here must also exist in destination_config.json.",
+  "_about": "Which file each feed reads and how to parse it. Each feed states its settings in full - there is no shared defaults block, so a feed can be read and changed without consulting anything else in this file. The connection is still referenced by name from connection_config.json. Every feed key here must also exist in destination_config.json.",
 
-  "defaults": {
-    "_about": "Merged recursively into each feed, so a feed overriding format.quote_char inherits the rest of format. Anything omitted here falls back to runtime_config.json.",
-
-    "connection": "gdrive_primary",
-    "source_type": "csv",
-
-    "file": {
-      "file_id": "",
-      "file_name": "",
-      "folder_id": "",
-      "match": {
-        "enabled": false,
-        "pattern": "*.csv",
-        "strategy": "newest",
-        "recursive": false,
-        "min_modified_time": null
-      }
-    },
-    "format": {
-      "delimiter": ",",
-      "encoding": "utf-8",
-      "quote_char": "\"",
-      "escape_char": null,
-      "null_values": ["", "NA", "N/A", "NULL", "null"],
-      "trim_whitespace": true
-    },
-    "header": {
-      "has_header": true,
-      "header_row_number": 1,
-      "skip_rows_after_header": 0
-    },
-    "validation": {
-      "enforce_column_list": true,
-      "fail_on_missing_columns": true,
-      "fail_on_extra_columns": false,
-      "enforce_primary_key_unique": true,
-      "deduplicate_on_primary_key": false,
-      "fail_on_null_primary_key": true
-    },
-
-    "file_overrides": [],
-    "_file_overrides_note": "Header and format details can differ between files a single feed matches, so each entry here applies to the files matching its glob. Shape: {\"pattern\": \"*_v2.csv\", \"header\": {...}, \"format\": {...}, \"columns\": [...], \"primary_key\": [...]} - every key except 'pattern' is optional and merges over the feed's own settings. Entries are tested in order and the FIRST match wins, so list the most specific patterns first; a file matching none is read with the feed's settings unchanged. An override carrying 'columns' also replaces the declared schema for those files, which the table schema check then validates against."
-  },
+  "_shape_note": "Per feed: connection, source_type, file (identity and/or match), format, header, validation, file_overrides, columns, primary_key. Anything genuinely omitted still falls back to runtime_config.json, but feeds are written out in full so nothing is implicit.",
 
   "feeds": {
     "dataset1": {
       "description": "Dataset1.csv in a shared folder, resolved by exact name.",
+
+      "connection": "gdrive_primary",
+      "source_type": "csv",
+
       "file": {
+        "file_id": "",
         "file_name": "Dataset1.csv",
-        "folder_id": "1qsypOaPkJEy6QvrO21WPsi1xFhnxUW4r"
+        "folder_id": "1qsypOaPkJEy6QvrO21WPsi1xFhnxUW4r",
+        "match": {
+          "enabled": false,
+          "pattern": "*.csv",
+          "strategy": "newest",
+          "recursive": false,
+          "min_modified_time": null
+        }
       },
+
+      "format": {
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "quote_char": "\"",
+        "escape_char": null,
+        "null_values": ["", "NA", "N/A", "NULL", "null"],
+        "trim_whitespace": true
+      },
+
+      "header": {
+        "has_header": true,
+        "header_row_number": 1,
+        "skip_rows_after_header": 0
+      },
+
+      "validation": {
+        "enforce_column_list": true,
+        "fail_on_missing_columns": true,
+        "fail_on_extra_columns": false,
+        "enforce_primary_key_unique": true,
+        "deduplicate_on_primary_key": false,
+        "fail_on_null_primary_key": true
+      },
+
+      "file_overrides": [],
+
       "columns": [
         { "name": "AAA", "type": "bigint", "nullable": false },
         { "name": "BBB", "type": "bigint", "nullable": true },
         { "name": "CCC", "type": "bigint", "nullable": true }
       ],
+
       "primary_key": ["AAA"]
     },
 
     "file_daily": {
       "description": "Date-stamped daily drop, e.g. file20260926.csv, selected by glob.",
+
+      "connection": "gdrive_primary",
+      "source_type": "csv",
+
       "file": {
+        "file_id": "",
+        "file_name": "",
         "folder_id": "1V6AmKhu4illJyUNXqcEeCE47gHQNj12O",
         "match": {
           "enabled": true,
           "pattern": "file*.csv",
-          "strategy": "newest"
+          "strategy": "newest",
+          "recursive": false,
+          "min_modified_time": null
         }
       },
+
       "format": {
+        "delimiter": ",",
+        "encoding": "utf-8",
         "quote_char": "'",
-        "_quote_note": "This source quotes only its non-numeric field (DDD arrives as 'A'), as a QUOTE_NONNUMERIC-style export does. With the default double quote the apostrophes would be kept and DDD would store the literal 'A'."
+        "escape_char": null,
+        "null_values": ["", "NA", "N/A", "NULL", "null"],
+        "trim_whitespace": true,
+        "_quote_note": "This source quotes only its non-numeric field (DDD arrives as 'A'), as a QUOTE_NONNUMERIC-style export does. A double quote here would keep the apostrophes and store DDD as the literal 'A'."
       },
+
+      "header": {
+        "has_header": true,
+        "header_row_number": 1,
+        "skip_rows_after_header": 0
+      },
+
+      "validation": {
+        "enforce_column_list": true,
+        "fail_on_missing_columns": true,
+        "fail_on_extra_columns": false,
+        "enforce_primary_key_unique": true,
+        "deduplicate_on_primary_key": false,
+        "fail_on_null_primary_key": true
+      },
+
+      "file_overrides": [],
+
       "columns": [
         { "name": "AAA", "type": "bigint", "nullable": false },
         { "name": "BBB", "type": "bigint", "nullable": true },
         { "name": "CCC", "type": "bigint", "nullable": true },
         { "name": "DDD", "type": "string", "nullable": true }
       ],
+
       "primary_key": ["AAA"],
+
       "_pk_note": "AAA is unique within one drop but repeats across drops, and all drops land in one table. The uniqueness check therefore validates each drop in isolation, not the table as a whole."
     }
   }
