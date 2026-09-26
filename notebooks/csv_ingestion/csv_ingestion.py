@@ -2,8 +2,16 @@
 # MAGIC %md
 # MAGIC # CSV from Google Drive → `dataplatform_dev.bronze_dev.ef_csv_<filename>`
 # MAGIC
-# MAGIC Config-driven ingestion. Nothing about a particular feed is hard-coded here — the three
-# MAGIC JSON files under `config/` describe the connection, the source file and the destination.
+# MAGIC Config-driven ingestion. Nothing about a particular feed is hard-coded here — three JSON
+# MAGIC files describe the connection, the source file and the destination.
+# MAGIC
+# MAGIC One directory per feed under `configs/`, selected by the `config_dir` widget, so the same
+# MAGIC notebook serves every feed:
+# MAGIC
+# MAGIC | `config_dir` | Feed |
+# MAGIC |---|---|
+# MAGIC | `configs/dataset1` | `Dataset1.csv`, resolved by name within its shared folder |
+# MAGIC | `configs/file_daily` | `file<YYYYMMDD>.csv`, newest match by glob, one table per drop |
 # MAGIC
 # MAGIC | File | Holds |
 # MAGIC |---|---|
@@ -34,7 +42,10 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("config_dir", "config", "Config directory")
+# One config directory per feed, under configs/. Point config_dir at the feed to run:
+#   configs/dataset1    - Dataset1.csv, resolved by name within its shared folder
+#   configs/file_daily  - date-stamped daily drop, resolved by glob
+dbutils.widgets.text("config_dir", "configs/dataset1", "Config directory")
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "Dry run (skip write)")
 
 CONFIG_DIR = dbutils.widgets.get("config_dir")

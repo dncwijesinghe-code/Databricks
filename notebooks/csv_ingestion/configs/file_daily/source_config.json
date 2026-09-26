@@ -1,0 +1,56 @@
+{
+  "source_type": "csv",
+  "description": "Date-stamped daily drop, e.g. file20260926.csv - four columns, the last one quoted.",
+
+  "file": {
+    "file_id": "",
+    "file_name": "",
+    "folder_id": "1V6AmKhu4illJyUNXqcEeCE47gHQNj12O",
+
+    "match": {
+      "enabled": true,
+      "pattern": "file*.csv",
+      "strategy": "newest",
+      "recursive": false,
+      "min_modified_time": null
+    },
+
+    "_note": "Filenames carry the drop date, so there is no fixed name to match - selection is by pattern and file_name is left empty. match takes precedence over file_name anyway.",
+    "_strategy_note": "'newest' ingests only the most recently modified match, which suits a scheduled daily pull. A drop missed while no run happened is skipped; backfill it by switching to 'all' or by naming its file_id directly."
+  },
+
+  "format": {
+    "delimiter": ",",
+    "encoding": "utf-8",
+    "quote_char": "'",
+    "escape_char": null,
+    "null_values": ["", "NA", "N/A", "NULL", "null"],
+    "trim_whitespace": true,
+    "_quote_note": "The source quotes only its non-numeric field (DDD arrives as 'A'), which is what a QUOTE_NONNUMERIC-style export produces. quote_char must therefore be an apostrophe, not the usual double quote - with \" the quotes would be kept and DDD would be stored as the literal 'A'."
+  },
+
+  "header": {
+    "has_header": true,
+    "header_row_number": 1,
+    "skip_rows_after_header": 0
+  },
+
+  "columns": [
+    { "name": "AAA", "type": "bigint", "nullable": false },
+    { "name": "BBB", "type": "bigint", "nullable": true },
+    { "name": "CCC", "type": "bigint", "nullable": true },
+    { "name": "DDD", "type": "string", "nullable": true }
+  ],
+
+  "primary_key": ["AAA"],
+
+  "validation": {
+    "enforce_column_list": true,
+    "fail_on_missing_columns": true,
+    "fail_on_extra_columns": false,
+    "enforce_primary_key_unique": true,
+    "deduplicate_on_primary_key": false,
+    "fail_on_null_primary_key": true,
+    "_note": "AAA is unique within a single drop. It is not unique across drops, but each drop lands in its own table so the check stays valid."
+  }
+}
