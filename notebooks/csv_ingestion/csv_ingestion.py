@@ -20,6 +20,18 @@
 # MAGIC which supplies `catalog` and `schema`. A feed may still override `catalog` or `schema`
 # MAGIC directly.
 # MAGIC
+# MAGIC ### When files in one feed differ
+# MAGIC
+# MAGIC Header layout, quoting and even the column set can vary between the files a feed matches, so
+# MAGIC these are resolved **per file** rather than once per feed. A feed's `file_overrides` is a
+# MAGIC list of `{ "pattern": …, "header": …, "format": …, "columns": …, "primary_key": … }`; entries
+# MAGIC are tested in order and the **first match wins**, so list the most specific patterns first.
+# MAGIC Each override merges over the feed's own settings, so it need only state what differs. A file
+# MAGIC matching no pattern is read with the feed's settings unchanged.
+# MAGIC
+# MAGIC Because an override can change `columns` or `primary_key`, the schema check and the `delta`
+# MAGIC requirements are both evaluated against what each individual file resolved to.
+# MAGIC
 # MAGIC ### How a run changes the table
 # MAGIC
 # MAGIC A feed's `destination.load_type` states the intent; `runtime_config.load_types` defines what
@@ -233,21 +245,17 @@ if LOAD_TYPE not in RUNTIME["load_types"]:
     )
 LOAD_SPEC = RUNTIME["load_types"][LOAD_TYPE]
 
-if LOAD_SPEC.get("requires_primary_key") and not (source.get("primary_key") or []):
-    raise ValueError(
-        "Feed {!r} uses load_type {!r}, which matches rows on the primary key, but "
-        "source.primary_key is empty.".format(FEED, LOAD_TYPE)
-    )
-
-# A merge fails outright if one source row could match a target row more than once, so an
-# upsert feed must guarantee key uniqueness rather than leaving duplicates to surface later.
-if LOAD_SPEC.get("merge"):
-    _rules = deep_merge(RUNTIME["validation_fallbacks"], source.get("validation"))
-    if not (_rules["enforce_primary_key_unique"] or _rules["deduplicate_on_primary_key"]):
+# An early check on the feed's own settings. A file_override may supply a primary key the feed
+# lacks, so this only objects when neither the feed nor any override provides one; the settings
+# actually used for each file are re-checked per file before it is read.
+if LOAD_SPEC.get("requires_primary_key"):
+    _overrides = source.get("file_overrides") or []
+    if not (source.get("primary_key") or []) and not any(
+        o.get("primary_key") for o in _overrides
+    ):
         raise ValueError(
-            "Feed {!r} uses load_type {!r} but neither enforce_primary_key_unique nor "
-            "deduplicate_on_primary_key is set. Duplicate keys would make the merge fail "
-            "with an unhelpful error.".format(FEED, LOAD_TYPE)
+            "Feed {!r} uses load_type {!r}, which matches rows on the primary key, but neither "
+            "source.primary_key nor any file_override supplies one.".format(FEED, LOAD_TYPE)
         )
 
 if not destination.get("table"):
@@ -256,13 +264,43 @@ if not source.get("columns"):
     raise ValueError("Feed {!r} must set source.columns.".format(FEED))
 
 # Anything a feed leaves unset falls back to runtime_config rather than to a literal in the code.
-fmt = deep_merge(PARSER_CFG["fallbacks"], source.get("format"))
-hdr = deep_merge(PARSER_CFG["fallbacks"], source.get("header"))
-rules = deep_merge(RUNTIME["validation_fallbacks"], source.get("validation"))
 api = deep_merge(DRIVE_CFG["fallbacks"], connection.get("api"))
 
-declared = source["columns"]
-declared_names = [c["name"] for c in declared]
+
+def spec_for(file_name):
+    """Resolve parsing settings for one file.
+
+    Header layout, quoting and even the column set can differ between files a single feed
+    matches, so settings are resolved per file rather than once per feed. source.file_overrides
+    entries are tested in order and the first matching pattern wins; a file matching none is read
+    with the feed's own settings.
+    """
+    over = {}
+    matched = None
+    for entry in source.get("file_overrides") or []:
+        pattern = entry.get("pattern")
+        if pattern and fnmatch.fnmatch(file_name, pattern):
+            over = entry
+            matched = pattern
+            break
+
+    columns = over.get("columns") or source["columns"]
+    return {
+        "matched_pattern": matched,
+        "fmt": deep_merge(
+            deep_merge(PARSER_CFG["fallbacks"], source.get("format")), over.get("format")
+        ),
+        "hdr": deep_merge(
+            deep_merge(PARSER_CFG["fallbacks"], source.get("header")), over.get("header")
+        ),
+        "rules": deep_merge(
+            deep_merge(RUNTIME["validation_fallbacks"], source.get("validation")),
+            over.get("validation"),
+        ),
+        "columns": columns,
+        "names": [c["name"] for c in columns],
+        "primary_key": over.get("primary_key") or source.get("primary_key") or [],
+    }
 
 print("Feed        : {}".format(FEED))
 print("Connections : source {!r} -> destination {!r}".format(
@@ -473,8 +511,9 @@ def download(meta):
     return buffer.getvalue()
 
 
-def parse(raw_bytes):
+def parse(raw_bytes, spec):
     """Parse to a DataFrame of strings. Type inference is deliberately avoided - see below."""
+    fmt, hdr = spec["fmt"], spec["hdr"]
     read_args = dict(
         sep=fmt["delimiter"],
         encoding=fmt["encoding"],
@@ -492,7 +531,7 @@ def parse(raw_bytes):
         read_args["header"] = int(hdr["header_row_number"]) - offset
     else:
         read_args["header"] = None
-        read_args["names"] = declared_names
+        read_args["names"] = spec["names"]
 
     pdf = pd.read_csv(io.BytesIO(raw_bytes), **read_args)
 
@@ -507,10 +546,11 @@ def parse(raw_bytes):
     return pdf
 
 
-def validate_columns(pdf, file_name):
+def validate_columns(pdf, spec, file_name):
+    names, rules = spec["names"], spec["rules"]
     found = list(pdf.columns)
-    missing = [c for c in declared_names if c not in found]
-    extra = [c for c in found if c not in declared_names]
+    missing = [c for c in names if c not in found]
+    extra = [c for c in found if c not in names]
 
     if missing and rules["fail_on_missing_columns"]:
         raise ValueError("{}: declared columns absent from the CSV: {}".format(file_name, missing))
@@ -520,11 +560,11 @@ def validate_columns(pdf, file_name):
         print("    ignoring {} undeclared column(s): {}".format(len(extra), extra))
 
     if rules["enforce_column_list"]:
-        pdf = pdf[[c for c in declared_names if c in found]]
+        pdf = pdf[[c for c in names if c in found]]
     return pdf
 
 
-def to_spark(pdf, file_name):
+def to_spark(pdf, spec, file_name):
     """All-strings first, then an explicit cast per declared type."""
     string_schema = StructType([StructField(c, StringType(), True) for c in pdf.columns])
     df = spark.createDataFrame(pdf.astype(object).where(pd.notnull(pdf), None), schema=string_schema)
@@ -534,7 +574,7 @@ def to_spark(pdf, file_name):
     # rather than by position, so reordering temporal_types cannot silently swap them.
     converters = {"date": F.to_date, "timestamp": F.to_timestamp}
 
-    for col in declared:
+    for col in spec["columns"]:
         name, dtype = col["name"], col["type"]
         if name not in df.columns:
             continue
@@ -551,7 +591,7 @@ def to_spark(pdf, file_name):
 
     # A failed cast yields NULL rather than raising, so a not-nullable column that gained
     # NULLs is reported here instead of silently corrupting the table.
-    for col in declared:
+    for col in spec["columns"]:
         if not col.get("nullable", True) and col["name"] in df.columns:
             bad = df.filter(F.col(col["name"]).isNull()).count()
             if bad:
@@ -562,8 +602,8 @@ def to_spark(pdf, file_name):
     return df
 
 
-def check_primary_key(df, file_name):
-    pk = source.get("primary_key") or []
+def check_primary_key(df, spec, file_name):
+    pk, rules = spec["primary_key"], spec["rules"]
     if not pk:
         return df
 
@@ -623,7 +663,7 @@ def add_metadata(df, meta, batch_id):
     return df
 
 
-def check_table_schema(df, file_name):
+def check_table_schema(df, spec, file_name):
     """Assert the built DataFrame matches the declared shape.
 
     With a single config file the schema has no second copy to drift out of step with, so this
@@ -632,7 +672,7 @@ def check_table_schema(df, file_name):
     """
     expected = destination.get("table_schema")
     if not expected:
-        expected = list(declared) + [
+        expected = list(spec["columns"]) + [
             {"name": name, "type": spec["type"], "nullable": spec.get("nullable", False)}
             for name, spec in selected_metadata()
         ]
@@ -689,14 +729,14 @@ def write_plain(df, fqn, write_mode):
     writer.saveAsTable(fqn)
 
 
-def merge_into(df, fqn):
+def merge_into(df, fqn, spec):
     """Upsert on the primary key: matched rows updated, unmatched inserted.
 
     Rows already in the table but absent from this file are left untouched - the file is treated
     as a set of changes, not as the full picture. Use load_type 'full' for the latter.
     """
     merge_cfg = RUNTIME["merge"]
-    pk = source["primary_key"]
+    pk = spec["primary_key"]
 
     view = "{}{}".format(merge_cfg["temp_view_prefix"], uuid.uuid4().hex[:12])
     df.createOrReplaceTempView(view)
@@ -719,13 +759,35 @@ def merge_into(df, fqn):
 
 def ingest(meta):
     """Download, parse, validate and write one Drive file. Returns a summary dict."""
-    print("  {}".format(meta["name"]))
-    pdf = validate_columns(parse(download(meta)), meta["name"])
-    df = check_primary_key(to_spark(pdf, meta["name"]), meta["name"])
+    name = meta["name"]
+    spec = spec_for(name)
+    print("  {}{}".format(name, "" if not spec["matched_pattern"]
+                          else "  (override {!r})".format(spec["matched_pattern"])))
+
+    # An override can change the primary key, so the delta requirements are re-checked against
+    # what this particular file actually resolved to, not just the feed's base settings.
+    if LOAD_SPEC["merge"]:
+        if not spec["primary_key"]:
+            raise ValueError(
+                "{}: load_type {!r} needs a primary key, but the settings resolved for this "
+                "file have none.".format(name, LOAD_TYPE)
+            )
+        if not (
+            spec["rules"]["enforce_primary_key_unique"]
+            or spec["rules"]["deduplicate_on_primary_key"]
+        ):
+            raise ValueError(
+                "{}: load_type {!r} needs key uniqueness enforced or deduplicated.".format(
+                    name, LOAD_TYPE
+                )
+            )
+
+    pdf = validate_columns(parse(download(meta), spec), spec, name)
+    df = check_primary_key(to_spark(pdf, spec, name), spec, name)
 
     batch_id = str(uuid.uuid4())
     df = add_metadata(df, meta, batch_id)
-    check_table_schema(df, meta["name"])
+    check_table_schema(df, spec, name)
 
     fqn = "{}.{}.{}".format(
         destination["catalog"], destination["schema"], resolve_table(meta["name"])
@@ -753,7 +815,7 @@ def ingest(meta):
     existed = spark.catalog.tableExists(fqn)
 
     if LOAD_SPEC["merge"] and existed:
-        action = merge_into(df, fqn)
+        action = merge_into(df, fqn, spec)
     else:
         # A merge into a table that does not exist yet has nothing to match on, so the first
         # run writes the rows plainly and later runs upsert.

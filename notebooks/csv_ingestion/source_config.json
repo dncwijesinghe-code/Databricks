@@ -40,7 +40,10 @@
       "enforce_primary_key_unique": true,
       "deduplicate_on_primary_key": false,
       "fail_on_null_primary_key": true
-    }
+    },
+
+    "file_overrides": [],
+    "_file_overrides_note": "Header and format details can differ between files a single feed matches, so each entry here applies to the files matching its glob. Shape: {\"pattern\": \"*_v2.csv\", \"header\": {...}, \"format\": {...}, \"columns\": [...], \"primary_key\": [...]} - every key except 'pattern' is optional and merges over the feed's own settings. Entries are tested in order and the FIRST match wins, so list the most specific patterns first; a file matching none is read with the feed's settings unchanged. An override carrying 'columns' also replaces the declared schema for those files, which the table schema check then validates against."
   },
 
   "feeds": {
