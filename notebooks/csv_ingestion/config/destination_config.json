@@ -1,0 +1,25 @@
+{
+  "description": "Where the parsed CSV lands in Unity Catalog.",
+
+  "catalog": "dataplatform_dev",
+  "schema": "bronze_dev",
+
+  "table_name_prefix": "ef_csv_",
+  "table_name_override": null,
+  "_table_naming_note": "Default table name is ef_csv_<filename>, with the extension dropped and anything non-alphanumeric folded to underscores. Set table_name_override to bypass that entirely.",
+
+  "table_schema": null,
+  "_table_schema_note": "null means derive the table schema from source_config.columns plus the ingestion metadata columns. Supply an explicit list of {name,type,nullable} only when the table must differ from the source.",
+
+  "write_mode": "append",
+  "create_if_not_exists": true,
+  "_write_mode_note": "append (default), or overwrite for a full replace each run.",
+
+  "add_ingestion_metadata": true,
+  "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
+
+  "partition_by": [],
+  "table_properties": {
+    "delta.autoOptimize.optimizeWrite": "true"
+  }
+}
