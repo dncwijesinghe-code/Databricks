@@ -4,6 +4,7 @@
 
   "widgets": {
     "feed_default": "dataset1",
+    "connection_config_file_default": "connection_config.json",
     "source_config_file_default": "source_config.json",
     "destination_config_file_default": "destination_config.json",
     "dry_run_default": "false",

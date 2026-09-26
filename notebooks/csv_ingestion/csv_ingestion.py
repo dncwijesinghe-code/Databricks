@@ -7,15 +7,25 @@
 # MAGIC
 # MAGIC | File | Changes when | Holds |
 # MAGIC |---|---|---|
-# MAGIC | `source_config.json` | a feed is added or changed | `connection`, source `defaults`, per-feed file selection, columns, primary key |
-# MAGIC | `destination_config.json` | a feed is added or changed | destination `defaults`, per-feed catalog, schema, table, write mode |
+# MAGIC | `connection_config.json` | a new source account or target schema appears | named `sources` and `destinations`, each defined once |
+# MAGIC | `source_config.json` | a feed is added or changed | per-feed file selection, parsing, columns, primary key |
+# MAGIC | `destination_config.json` | a feed is added or changed | per-feed table and write mode |
 # MAGIC | `runtime_config.json` | rarely | Drive API details, parser fallbacks, metadata catalogue, writer options, naming rules |
+# MAGIC
+# MAGIC ### Connections are referenced, not repeated
+# MAGIC
+# MAGIC Many files can arrive from one Drive account and land in one catalog, so a feed names a
+# MAGIC connection rather than restating it: `connection` in its source block points at
+# MAGIC `connection_config.sources`, and in its destination block at `connection_config.destinations`,
+# MAGIC which supplies `catalog` and `schema`. A feed may still override `catalog` or `schema`
+# MAGIC directly.
 # MAGIC
 # MAGIC ### Adding an ingestion
 # MAGIC
 # MAGIC Add a block under `feeds` in **both** `source_config.json` (folder, how to pick the file,
-# MAGIC `columns`) and `destination_config.json` (`table`), using the same feed key. Nothing in this
-# MAGIC notebook changes, and `runtime_config.json` does not either.
+# MAGIC `columns`) and `destination_config.json` (`table`), using the same feed key. If it reuses an
+# MAGIC existing source and destination, the inherited `connection` defaults already point at them
+# MAGIC and nothing else changes.
 # MAGIC
 # MAGIC The notebook warns when a feed key exists in one file but not the other, and fails with a
 # MAGIC message naming the missing side if the selected feed is half-defined.
@@ -83,6 +93,9 @@ RUNTIME = load_json(dbutils.widgets.get("runtime_config_file").strip())
 
 W = RUNTIME["widgets"]
 dbutils.widgets.text("feed", W["feed_default"], "Feed (key under 'feeds')")
+dbutils.widgets.text(
+    "connection_config_file", W["connection_config_file_default"], "Connection config file"
+)
 dbutils.widgets.text("source_config_file", W["source_config_file_default"], "Source config file")
 dbutils.widgets.text(
     "destination_config_file", W["destination_config_file_default"], "Destination config file"
@@ -152,9 +165,47 @@ if FEED not in dst_feeds:
         )
     )
 
-connection = src_cfg["connection"]
 source = deep_merge(src_cfg.get("defaults") or {}, src_feeds[FEED])
 destination = deep_merge(dst_cfg.get("defaults") or {}, dst_feeds[FEED])
+
+# Resolve the named connections. Defined once in connection_config.json, so any number of feeds
+# reading from the same Drive account or writing to the same catalog share one definition.
+conn_path = dbutils.widgets.get("connection_config_file").strip()
+conn_cfg = load_json(conn_path)
+
+
+def named_connection(kind, name):
+    pool = conn_cfg.get(kind) or {}
+    if name not in pool:
+        raise ValueError(
+            "Feed {!r} names {} connection {!r}, which is not defined in {}. Available: {}".format(
+                FEED, kind[:-1], name, os.path.basename(conn_path), sorted(pool) or "none"
+            )
+        )
+    return pool[name]
+
+
+source_connection_name = source.get("connection")
+dest_connection_name = destination.get("connection")
+if not source_connection_name:
+    raise ValueError("Feed {!r} must name a source connection.".format(FEED))
+if not dest_connection_name:
+    raise ValueError("Feed {!r} must name a destination connection.".format(FEED))
+
+connection = named_connection("sources", source_connection_name)
+dest_connection = named_connection("destinations", dest_connection_name)
+
+# catalog and schema come from the destination connection; a feed may still override either.
+destination = deep_merge(
+    {k: v for k, v in dest_connection.items() if k in ("catalog", "schema")}, destination
+)
+for key in ("catalog", "schema"):
+    if not destination.get(key):
+        raise ValueError(
+            "Feed {!r}: neither destination connection {!r} nor the feed supplies {}.".format(
+                FEED, dest_connection_name, key
+            )
+        )
 
 if not destination.get("table"):
     raise ValueError("Feed {!r} must set destination.table.".format(FEED))
@@ -170,15 +221,21 @@ api = deep_merge(DRIVE_CFG["fallbacks"], connection.get("api"))
 declared = source["columns"]
 declared_names = [c["name"] for c in declared]
 
-print("Runtime     : {}".format(resolve_path(dbutils.widgets.get("runtime_config_file").strip())))
-print("Source      : {}".format(resolve_path(source_path)))
-print("Destination : {}".format(resolve_path(dest_path)))
 print("Feed        : {}".format(FEED))
+print("Connections : source {!r} -> destination {!r}".format(
+    source_connection_name, dest_connection_name
+))
 print(
     "Target      : {}.{}.{}".format(
         destination["catalog"], destination["schema"], destination["table"]
     )
 )
+print("Config      : {} | {} | {} | {}".format(
+    os.path.basename(resolve_path(dbutils.widgets.get("runtime_config_file").strip())),
+    os.path.basename(resolve_path(conn_path)),
+    os.path.basename(resolve_path(source_path)),
+    os.path.basename(resolve_path(dest_path)),
+))
 
 # COMMAND ----------
 

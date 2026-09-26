@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "_about": "Where the data lands. 'defaults' applies to all feeds; each entry under 'feeds' overrides only what differs. Every feed key here must also exist in source_config.json - the notebook checks both sides and names any feed present in one file but not the other.",
+  "_about": "Which table each feed writes to. The catalog and schema come from the named destination connection in connection_config.json, so feeds landing in the same place do not repeat it. Every feed key here must also exist in source_config.json.",
 
   "defaults": {
-    "catalog": "dataplatform_dev",
-    "schema": "bronze_dev",
+    "connection": "bronze_dev",
+
     "table": null,
     "append_filename_suffix": false,
     "write_mode": "append",
@@ -17,6 +17,7 @@
     },
     "table_schema": null,
 
+    "_connection_note": "'connection' names an entry under connection_config.destinations, which supplies catalog and schema. A feed may still set catalog or schema directly to override just that part.",
     "_table_note": "'table' is the bare table name and is required per feed. Set append_filename_suffix true for one table per file, named <table>_<filename slug>.",
     "_schema_note": "'table_schema' null means derive it from the feed's source columns plus the selected metadata_columns, so there is no second copy of the schema to drift out of step.",
     "_metadata_note": "metadata_columns selects by name from runtime_config.json's catalogue, which declares each column's type and the value it carries."
@@ -24,12 +25,12 @@
 
   "feeds": {
     "dataset1": {
-      "description": "Dataset1.csv -> dataplatform_dev.bronze_dev.Table01",
+      "description": "Dataset1.csv -> Table01 in the bronze_dev destination.",
       "table": "Table01"
     },
 
     "file_daily": {
-      "description": "Every date-stamped drop accumulates in dataplatform_dev.bronze_dev.Table02.",
+      "description": "Every date-stamped drop accumulates in Table02 in the bronze_dev destination.",
       "table": "Table02",
       "_write_note": "Append, so re-running on the same day adds a second batch rather than replacing it. _batch_id distinguishes them; switch write_mode to overwrite if a re-run should replace instead."
     }

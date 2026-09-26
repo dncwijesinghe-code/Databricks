@@ -1,27 +1,13 @@
 {
   "version": 1,
-  "_about": "Where the data comes from and how to read it. 'connection' is the Google Drive connection shared by every feed, 'defaults' applies to all feeds, and each entry under 'feeds' overrides only what differs. Every feed key here must also exist in destination_config.json.",
-
-  "connection": {
-    "provider": "google_drive",
-    "auth": {
-      "method": "service_account",
-      "secret_scope": "gdrive",
-      "secret_key": "service_account_json",
-      "service_account_email": "databricksserviceaccount@databricksingestion-509802.iam.gserviceaccount.com",
-      "_note": "The key itself lives in the Databricks secret scope above and is never stored here. Share each Drive folder with service_account_email, or lookups return 404."
-    },
-    "api": {
-      "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
-      "timeout_seconds": 120,
-      "max_retries": 3,
-      "chunk_size_bytes": 10485760
-    }
-  },
+  "_about": "Which file each feed reads and how to parse it. The connection itself lives in connection_config.json and is referenced by name, so feeds sharing a source do not repeat it. Every feed key here must also exist in destination_config.json.",
 
   "defaults": {
     "_about": "Merged recursively into each feed, so a feed overriding format.quote_char inherits the rest of format. Anything omitted here falls back to runtime_config.json.",
+
+    "connection": "gdrive_primary",
     "source_type": "csv",
+
     "file": {
       "file_id": "",
       "file_name": "",
