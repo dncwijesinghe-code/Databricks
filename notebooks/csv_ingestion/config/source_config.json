@@ -1,19 +1,29 @@
 {
   "source_type": "csv",
-  "description": "Everything needed to locate and correctly parse the CSV.",
+  "description": "Dataset1.csv - three integer columns with a single header row.",
 
   "file": {
     "file_id": "",
-    "file_name": "sales_extract.csv",
+    "file_name": "Dataset1.csv",
     "folder_id": "",
-    "_note": "Give file_id for an exact match. Otherwise file_name is resolved within folder_id; the lookup fails loudly if the name is ambiguous."
+
+    "match": {
+      "enabled": false,
+      "pattern": "Dataset*.csv",
+      "strategy": "newest",
+      "recursive": false,
+      "min_modified_time": null
+    },
+
+    "_note": "Precedence: file_id wins outright; then match (glob within folder_id); then file_name. Set match.enabled true and fill folder_id to ingest from a shared drop-folder where names vary.",
+    "_match_note": "strategy 'newest' takes the most recently modified match; 'all' ingests every match, each into its own ef_csv_<filename> table unless destination.table_name_override is set. recursive walks subfolders - Drive matches direct children only otherwise. min_modified_time is an RFC-3339 timestamp, e.g. 2026-01-01T00:00:00Z."
   },
 
   "format": {
     "delimiter": ",",
     "encoding": "utf-8",
     "quote_char": "\"",
-    "escape_char": "\\",
+    "escape_char": null,
     "null_values": ["", "NA", "N/A", "NULL", "null"],
     "trim_whitespace": true
   },
@@ -22,19 +32,16 @@
     "has_header": true,
     "header_row_number": 1,
     "skip_rows_after_header": 0,
-    "_note": "header_row_number is 1-based and counts from the top of the file, so a 3-row preamble means header_row_number = 4. Ignored when has_header is false, in which case column order below defines the layout."
+    "_note": "header_row_number is 1-based and counts from the top of the file. Dataset1.csv has its header on the very first line, so 1 is correct."
   },
 
   "columns": [
-    { "name": "id",          "type": "bigint",         "nullable": false },
-    { "name": "order_ref",   "type": "string",         "nullable": false },
-    { "name": "customer",    "type": "string",         "nullable": true  },
-    { "name": "order_date",  "type": "date",           "nullable": true,  "format": "yyyy-MM-dd" },
-    { "name": "amount",      "type": "decimal(18,2)",  "nullable": true  },
-    { "name": "is_active",   "type": "boolean",        "nullable": true  }
+    { "name": "AAA", "type": "bigint", "nullable": false },
+    { "name": "BBB", "type": "bigint", "nullable": true },
+    { "name": "CCC", "type": "bigint", "nullable": true }
   ],
 
-  "primary_key": ["id"],
+  "primary_key": ["AAA"],
 
   "validation": {
     "enforce_column_list": true,

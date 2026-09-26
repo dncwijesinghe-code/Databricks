@@ -4,3 +4,10 @@ __pycache__/
 .env
 .databricks/
 .claude/
+
+# Google service-account keys - never commit these
+sa-key.json
+*-sa-key.json
+*service-account*.json
+gcp-key*.json
+credentials.json

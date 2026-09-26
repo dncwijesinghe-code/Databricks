@@ -1,15 +1,24 @@
 {
-  "description": "Where the parsed CSV lands in Unity Catalog.",
+  "description": "Dataset1.csv -> dataplatform_dev.bronze_dev.ef_csv_dataset1",
 
   "catalog": "dataplatform_dev",
   "schema": "bronze_dev",
 
   "table_name_prefix": "ef_csv_",
   "table_name_override": null,
-  "_table_naming_note": "Default table name is ef_csv_<filename>, with the extension dropped and anything non-alphanumeric folded to underscores. Set table_name_override to bypass that entirely.",
+  "_table_naming_note": "Table name is ef_csv_<filename>, extension dropped and non-alphanumeric folded to underscore. 'Dataset1.csv' therefore resolves to 'ef_csv_dataset1'. Set table_name_override to bypass that - also the way to land several matched files in one shared table.",
 
-  "table_schema": null,
-  "_table_schema_note": "null means derive the table schema from source_config.columns plus the ingestion metadata columns. Supply an explicit list of {name,type,nullable} only when the table must differ from the source.",
+  "table_schema": [
+    { "name": "AAA", "type": "bigint", "nullable": false },
+    { "name": "BBB", "type": "bigint", "nullable": true },
+    { "name": "CCC", "type": "bigint", "nullable": true },
+
+    { "name": "_batch_id", "type": "string", "nullable": false },
+    { "name": "_ingested_at", "type": "timestamp", "nullable": false },
+    { "name": "_source_file_name", "type": "string", "nullable": false },
+    { "name": "_source_file_id", "type": "string", "nullable": false }
+  ],
+  "_table_schema_note": "The full table shape: the source columns from source_config.json followed by the ingestion metadata. Checked against the DataFrame before every write, so a drift between the two configs fails the run instead of silently producing a differently-shaped table. Set to null to skip the check and derive the shape from the source instead.",
 
   "write_mode": "append",
   "create_if_not_exists": true,
@@ -19,6 +28,8 @@
   "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
 
   "partition_by": [],
+  "_partition_note": "Empty is right for a table this small. Partitioning under roughly a few GB costs more than it saves.",
+
   "table_properties": {
     "delta.autoOptimize.optimizeWrite": "true"
   }
