@@ -5,11 +5,16 @@
 # MAGIC Fully config-driven. The notebook holds logic only; every value it uses comes from one of
 # MAGIC two JSON files.
 # MAGIC
+# MAGIC The config files live in the directory named by the `config_dir` widget, alongside this
+# MAGIC notebook — `csv_ingestion_config/` by default. (Not `csv_ingestion/`: Databricks drops the
+# MAGIC `.py` extension in the workspace, so a folder of that name would collide with this notebook's
+# MAGIC own path.)
+# MAGIC
 # MAGIC | File | Changes when | Holds |
 # MAGIC |---|---|---|
 # MAGIC | `connection_config.json` | a new source account or target schema appears | named `sources` and `destinations`, each defined once |
 # MAGIC | `source_config.json` | a feed is added or changed | per-feed file selection, parsing, columns, primary key |
-# MAGIC | `destination_config.json` | a feed is added or changed | per-feed table and write mode |
+# MAGIC | `destination_config.json` | a feed is added or changed | per-feed table and load type |
 # MAGIC | `runtime_config.json` | rarely | Drive API details, parser fallbacks, metadata catalogue, writer options, naming rules |
 # MAGIC
 # MAGIC ### Connections are referenced, not repeated
@@ -103,12 +108,24 @@
 
 import json, os, io, re, uuid, fnmatch, copy
 
-# The only path the notebook names itself - everything else is read from the file it points at.
+# The only paths the notebook names itself: the directory holding the config files, and the
+# runtime config within it. Everything else is read from the file that one points at.
+dbutils.widgets.text("config_dir", "csv_ingestion_config", "Config directory")
 dbutils.widgets.text("runtime_config_file", "runtime_config.json", "Runtime config file")
+
+CONFIG_DIR = dbutils.widgets.get("config_dir").strip()
 
 
 def resolve_path(name):
-    return name if os.path.exists(name) else os.path.join(os.getcwd(), name)
+    """Resolve a config filename inside config_dir, which is relative to this notebook.
+
+    A name that already resolves as given is used as-is, so an absolute path or one relative to
+    the working directory still works.
+    """
+    for candidate in (os.path.join(CONFIG_DIR, name) if CONFIG_DIR else name, name):
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(os.getcwd(), CONFIG_DIR, name)
 
 
 def strip_docs(node):
