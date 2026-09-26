@@ -80,8 +80,38 @@
     "format": "delta",
     "options": { "mergeSchema": "false" },
     "_options_note": "mergeSchema stays false so a changed source shape fails the run instead of silently widening the table.",
-    "fallback_write_mode": "append",
+    "fallback_load_type": "append",
     "create_schema_sql": "CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}"
+  },
+
+  "_load_types_note": "A feed's destination.load_type names what a run should do to the table. This maps each name to the behaviour that implements it, so the feed config states intent rather than Spark write modes.",
+  "load_types": {
+    "full": {
+      "write_mode": "overwrite",
+      "merge": false,
+      "requires_primary_key": false,
+      "description": "Delete and load. Replaces the table's contents each run, so the table always mirrors the current file."
+    },
+    "append": {
+      "write_mode": "append",
+      "merge": false,
+      "requires_primary_key": false,
+      "description": "Adds the file's rows to whatever is already there. History accumulates; re-running the same file duplicates it."
+    },
+    "delta": {
+      "write_mode": "append",
+      "merge": true,
+      "requires_primary_key": true,
+      "description": "Upsert on the primary key: existing keys are updated, new keys inserted, rows absent from the file are left alone. Re-running the same file is idempotent."
+    }
+  },
+
+  "merge": {
+    "sql": "MERGE INTO {target} AS t USING {source_view} AS s ON {on_clause} WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *",
+    "on_template": "t.`{column}` = s.`{column}`",
+    "on_separator": " AND ",
+    "temp_view_prefix": "ingest_src_",
+    "_note": "UPDATE SET * overwrites the metadata columns too, so a matched row's _batch_id and _ingested_at reflect the run that last changed it rather than the one that first inserted it."
   },
 
   "table_naming": {

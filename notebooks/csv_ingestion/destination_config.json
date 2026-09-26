@@ -7,8 +7,10 @@
 
     "table": null,
     "append_filename_suffix": false,
-    "write_mode": "append",
+    "load_type": "append",
     "create_if_not_exists": true,
+
+    "_load_type_note": "What a run does to the table. 'full' deletes and loads, replacing the contents each run. 'append' adds rows, so history accumulates and re-running the same file duplicates it. 'delta' upserts on the primary key, which makes a re-run idempotent and needs source.primary_key set with uniqueness enforced. The behaviour behind each name is defined in runtime_config.load_types.",
     "add_ingestion_metadata": true,
     "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
     "partition_by": [],
@@ -32,7 +34,8 @@
     "file_daily": {
       "description": "Every date-stamped drop accumulates in Table02 in the bronze_dev destination.",
       "table": "Table02",
-      "_write_note": "Append, so re-running on the same day adds a second batch rather than replacing it. _batch_id distinguishes them; switch write_mode to overwrite if a re-run should replace instead."
+      "load_type": "append",
+      "_load_note": "Append is deliberate here: each daily drop is a new set of rows to keep, and _batch_id tells the drops apart. Note this makes a same-day re-run additive rather than idempotent - use 'delta' if a re-run should update in place instead, though AAA repeats across drops so it is not a usable key across the whole table."
     }
   }
 }

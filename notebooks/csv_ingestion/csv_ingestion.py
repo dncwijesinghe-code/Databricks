@@ -20,6 +20,23 @@
 # MAGIC which supplies `catalog` and `schema`. A feed may still override `catalog` or `schema`
 # MAGIC directly.
 # MAGIC
+# MAGIC ### How a run changes the table
+# MAGIC
+# MAGIC A feed's `destination.load_type` states the intent; `runtime_config.load_types` defines what
+# MAGIC each one does.
+# MAGIC
+# MAGIC | `load_type` | Effect | Re-running the same file |
+# MAGIC |---|---|---|
+# MAGIC | `full` | Delete and load — replaces the table's contents | table mirrors the file |
+# MAGIC | `append` | Adds the rows to what is already there | duplicates them |
+# MAGIC | `delta` | Upsert on the primary key | idempotent |
+# MAGIC
+# MAGIC `delta` treats the file as a set of changes: matched keys are updated, new keys inserted, and
+# MAGIC rows already in the table but absent from the file are **left alone**. Use `full` when the
+# MAGIC file is meant to be the whole picture. It requires `primary_key`, and key uniqueness must be
+# MAGIC enforced or deduplicated — the notebook refuses otherwise, because duplicate keys make a
+# MAGIC merge fail with an unhelpful error.
+# MAGIC
 # MAGIC ### Adding an ingestion
 # MAGIC
 # MAGIC Add a block under `feeds` in **both** `source_config.json` (folder, how to pick the file,
@@ -205,6 +222,32 @@ for key in ("catalog", "schema"):
             "Feed {!r}: neither destination connection {!r} nor the feed supplies {}.".format(
                 FEED, dest_connection_name, key
             )
+        )
+
+# What the run does to the table: full (delete and load), append, or delta (upsert on the key).
+LOAD_TYPE = destination.get("load_type") or WRITER_CFG["fallback_load_type"]
+if LOAD_TYPE not in RUNTIME["load_types"]:
+    raise ValueError(
+        "Feed {!r} sets load_type {!r}, which is not defined in runtime_config.load_types. "
+        "Available: {}".format(FEED, LOAD_TYPE, sorted(RUNTIME["load_types"]))
+    )
+LOAD_SPEC = RUNTIME["load_types"][LOAD_TYPE]
+
+if LOAD_SPEC.get("requires_primary_key") and not (source.get("primary_key") or []):
+    raise ValueError(
+        "Feed {!r} uses load_type {!r}, which matches rows on the primary key, but "
+        "source.primary_key is empty.".format(FEED, LOAD_TYPE)
+    )
+
+# A merge fails outright if one source row could match a target row more than once, so an
+# upsert feed must guarantee key uniqueness rather than leaving duplicates to surface later.
+if LOAD_SPEC.get("merge"):
+    _rules = deep_merge(RUNTIME["validation_fallbacks"], source.get("validation"))
+    if not (_rules["enforce_primary_key_unique"] or _rules["deduplicate_on_primary_key"]):
+        raise ValueError(
+            "Feed {!r} uses load_type {!r} but neither enforce_primary_key_unique nor "
+            "deduplicate_on_primary_key is set. Duplicate keys would make the merge fail "
+            "with an unhelpful error.".format(FEED, LOAD_TYPE)
         )
 
 if not destination.get("table"):
@@ -634,6 +677,46 @@ def resolve_table(file_name):
     return "{}{}{}".format(table, NAMING_CFG["suffix_separator"], slug)
 
 
+def write_plain(df, fqn, write_mode):
+    """A straight Delta write - used for full and append loads, and a delta load's first run."""
+    writer = df.write.format(WRITER_CFG["format"]).mode(write_mode)
+    for key, value in (WRITER_CFG.get("options") or {}).items():
+        writer = writer.option(key, value)
+    if destination.get("partition_by"):
+        writer = writer.partitionBy(*destination["partition_by"])
+    for key, value in (destination.get("table_properties") or {}).items():
+        writer = writer.option(key, value)
+    writer.saveAsTable(fqn)
+
+
+def merge_into(df, fqn):
+    """Upsert on the primary key: matched rows updated, unmatched inserted.
+
+    Rows already in the table but absent from this file are left untouched - the file is treated
+    as a set of changes, not as the full picture. Use load_type 'full' for the latter.
+    """
+    merge_cfg = RUNTIME["merge"]
+    pk = source["primary_key"]
+
+    view = "{}{}".format(merge_cfg["temp_view_prefix"], uuid.uuid4().hex[:12])
+    df.createOrReplaceTempView(view)
+    try:
+        on_clause = merge_cfg["on_separator"].join(
+            merge_cfg["on_template"].format(column=c) for c in pk
+        )
+        before = spark.table(fqn).count()
+        spark.sql(merge_cfg["sql"].format(target=fqn, source_view=view, on_clause=on_clause))
+        after = spark.table(fqn).count()
+    finally:
+        spark.catalog.dropTempView(view)
+
+    inserted = after - before
+    updated = df.count() - inserted
+    return "merged into (on {}: {} inserted, {} updated in)".format(
+        ", ".join(pk), inserted, updated
+    )
+
+
 def ingest(meta):
     """Download, parse, validate and write one Drive file. Returns a summary dict."""
     print("  {}".format(meta["name"]))
@@ -650,8 +733,15 @@ def ingest(meta):
     rows = df.count()
 
     if DRY_RUN:
-        print("    DRY RUN - would write {:,} rows to {}".format(rows, fqn))
-        return {"file": meta["name"], "table": fqn, "rows": rows, "batch_id": None, "written": False}
+        print("    DRY RUN - would {} {:,} rows to {}".format(LOAD_TYPE, rows, fqn))
+        return {
+            "file": meta["name"],
+            "table": fqn,
+            "rows": rows,
+            "batch_id": None,
+            "load_type": LOAD_TYPE,
+            "written": False,
+        }
 
     if destination.get("create_if_not_exists", True):
         spark.sql(
@@ -661,19 +751,28 @@ def ingest(meta):
         )
 
     existed = spark.catalog.tableExists(fqn)
-    writer = df.write.format(WRITER_CFG["format"]).mode(
-        destination.get("write_mode", WRITER_CFG["fallback_write_mode"])
-    )
-    for key, value in (WRITER_CFG.get("options") or {}).items():
-        writer = writer.option(key, value)
-    if destination.get("partition_by"):
-        writer = writer.partitionBy(*destination["partition_by"])
-    for key, value in (destination.get("table_properties") or {}).items():
-        writer = writer.option(key, value)
-    writer.saveAsTable(fqn)
 
-    print("    {} {} ({:,} rows)".format("appended to" if existed else "created", fqn, rows))
-    return {"file": meta["name"], "table": fqn, "rows": rows, "batch_id": batch_id, "written": True}
+    if LOAD_SPEC["merge"] and existed:
+        action = merge_into(df, fqn)
+    else:
+        # A merge into a table that does not exist yet has nothing to match on, so the first
+        # run writes the rows plainly and later runs upsert.
+        write_plain(df, fqn, LOAD_SPEC["write_mode"])
+        if LOAD_SPEC["merge"]:
+            action = "created (first load, nothing to merge into)"
+        else:
+            action = ("replaced contents of" if LOAD_SPEC["write_mode"] == "overwrite" else "appended to") \
+                if existed else "created"
+
+    print("    {} {} ({:,} rows, load_type={})".format(action, fqn, rows, LOAD_TYPE))
+    return {
+        "file": meta["name"],
+        "table": fqn,
+        "rows": rows,
+        "batch_id": batch_id,
+        "load_type": LOAD_TYPE,
+        "written": True,
+    }
 
 
 # COMMAND ----------
