@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "_about": "Named connections, defined once and referenced by any number of feeds. A feed names a source connection in source_config.json and a destination connection in destination_config.json, so many files arriving from the same Drive account and landing in the same catalog share one definition rather than repeating it.",
+
+  "sources": {
+    "_about": "Where files are read from. Credentials are named, never stored - the service-account JSON lives only in the Databricks secret scope.",
+
+    "gdrive_primary": {
+      "provider": "google_drive",
+      "description": "Service account used for all Drive ingestion.",
+      "auth": {
+        "method": "service_account",
+        "secret_scope": "gdrive",
+        "secret_key": "service_account_json",
+        "service_account_email": "databricksserviceaccount@databricksingestion-509802.iam.gserviceaccount.com",
+        "_note": "Share each Drive file or folder with service_account_email, or lookups return 404 rather than a permission error."
+      },
+      "api": {
+        "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+        "timeout_seconds": 120,
+        "max_retries": 3,
+        "chunk_size_bytes": 10485760
+      }
+    }
+  },
+
+  "destinations": {
+    "_about": "Where tables are written. One entry per catalog/schema target; the table name itself stays per feed in destination_config.json.",
+
+    "bronze_dev": {
+      "provider": "databricks_unity_catalog",
+      "description": "Bronze layer of the dev data platform - raw ingested files.",
+      "catalog": "dataplatform_dev",
+      "schema": "bronze_dev"
+    },
+
+    "silver_dev": {
+      "provider": "databricks_unity_catalog",
+      "description": "Silver layer - defined for convenience; no feed writes here yet.",
+      "catalog": "dataplatform_dev",
+      "schema": "silver_dev"
+    }
+  }
+}

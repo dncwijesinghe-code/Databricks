@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "_about": "Engine settings for csv_ingestion. Everything the notebook would otherwise hard-code lives here: Drive API details, parser fallbacks, the metadata column catalogue, writer options and naming rules. Feed-specific settings belong in ingestion_config.json instead - this file rarely changes, that one changes whenever a feed is added.",
+
+  "widgets": {
+    "feed_default": "dataset1",
+    "connection_config_file_default": "connection_config.json",
+    "source_config_file_default": "source_config.json",
+    "destination_config_file_default": "destination_config.json",
+    "dry_run_default": "false",
+    "_note": "Defaults only. A job's base_parameters override them."
+  },
+
+  "python_packages": ["google-api-python-client", "google-auth"],
+  "_python_packages_note": "Documented here for reference, but the %pip cell cannot read this file - a magic command runs before any Python does. Keep the two in step by hand if the requirement changes.",
+
+  "drive": {
+    "api_name": "drive",
+    "api_version": "v3",
+    "auth_method": "service_account",
+    "file_fields": ["id", "name", "mimeType", "size", "modifiedTime"],
+    "page_size": 1000,
+    "support_all_drives": true,
+    "include_items_from_all_drives": true,
+
+    "mime_types": {
+      "folder": "application/vnd.google-apps.folder",
+      "google_sheet": "application/vnd.google-apps.spreadsheet",
+      "sheet_export_as": "text/csv"
+    },
+    "_mime_note": "A native Google Sheet holds no file bytes and must be exported rather than downloaded, hence sheet_export_as.",
+
+    "queries": {
+      "children_of_folder": "'{folder_id}' in parents and trashed = false",
+      "by_name": "name = '{name}' and trashed = false",
+      "parent_clause": " and '{folder_id}' in parents"
+    },
+
+    "fallbacks": {
+      "chunk_size_bytes": 10485760,
+      "max_retries": 3
+    }
+  },
+
+  "parser": {
+    "header_row_is_one_based": true,
+    "temporal_types": ["date", "timestamp"],
+    "_temporal_note": "Types routed through to_date / to_timestamp when a column declares a 'format'. Anything else uses a plain cast.",
+
+    "fallbacks": {
+      "delimiter": ",",
+      "encoding": "utf-8",
+      "quote_char": "\"",
+      "null_values": [""],
+      "trim_whitespace": true,
+      "has_header": true,
+      "header_row_number": 1,
+      "skip_rows_after_header": 0
+    }
+  },
+
+  "validation_fallbacks": {
+    "enforce_column_list": true,
+    "fail_on_missing_columns": true,
+    "fail_on_extra_columns": false,
+    "enforce_primary_key_unique": true,
+    "deduplicate_on_primary_key": false,
+    "fail_on_null_primary_key": true
+  },
+
+  "_metadata_columns_note": "Catalogue of available ingestion metadata columns. A feed's destination.metadata_columns picks which of these to add by name. Adding a new kind means adding an entry here plus a matching 'value' producer in the notebook. This is a list rather than a map because every column name begins with an underscore, and keys starting with an underscore are stripped as documentation when config is loaded.",
+  "metadata_columns": [
+    { "name": "_batch_id", "type": "string", "value": "batch_id", "nullable": false },
+    { "name": "_ingested_at", "type": "timestamp", "value": "current_timestamp", "nullable": false },
+    { "name": "_source_file_name", "type": "string", "value": "source_file_name", "nullable": false },
+    { "name": "_source_file_id", "type": "string", "value": "source_file_id", "nullable": false }
+  ],
+
+  "writer": {
+    "format": "delta",
+    "options": { "mergeSchema": "false" },
+    "_options_note": "mergeSchema stays false so a changed source shape fails the run instead of silently widening the table.",
+    "fallback_load_type": "append",
+    "create_schema_sql": "CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}"
+  },
+
+  "_load_types_note": "A feed's destination.load_type names what a run should do to the table. This maps each name to the behaviour that implements it, so the feed config states intent rather than Spark write modes.",
+  "load_types": {
+    "full": {
+      "write_mode": "overwrite",
+      "merge": false,
+      "requires_primary_key": false,
+      "description": "Delete and load. Replaces the table's contents each run, so the table always mirrors the current file."
+    },
+    "append": {
+      "write_mode": "append",
+      "merge": false,
+      "requires_primary_key": false,
+      "description": "Adds the file's rows to whatever is already there. History accumulates; re-running the same file duplicates it."
+    },
+    "delta": {
+      "write_mode": "append",
+      "merge": true,
+      "requires_primary_key": true,
+      "description": "Upsert on the primary key: existing keys are updated, new keys inserted, rows absent from the file are left alone. Re-running the same file is idempotent."
+    }
+  },
+
+  "merge": {
+    "sql": "MERGE INTO {target} AS t USING {source_view} AS s ON {on_clause} WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *",
+    "on_template": "t.`{column}` = s.`{column}`",
+    "on_separator": " AND ",
+    "temp_view_prefix": "ingest_src_",
+    "_note": "UPDATE SET * overwrites the metadata columns too, so a matched row's _batch_id and _ingested_at reflect the run that last changed it rather than the one that first inserted it."
+  },
+
+  "table_naming": {
+    "suffix_separator": "_",
+    "non_alphanumeric_pattern": "[^0-9a-zA-Z]+",
+    "collapse_underscores_pattern": "_+",
+    "lowercase": true,
+    "digit_prefix": "t_",
+    "_digit_note": "A SQL identifier cannot begin with a digit, so a suffix starting with one is prefixed."
+  },
+
+  "verify_query": "SELECT {batch_col}, {file_col}, MIN({time_col}) AS ingested_at, COUNT(*) AS row_count FROM {table} GROUP BY {batch_col}, {file_col} ORDER BY ingested_at DESC",
+  "_verify_note": "Column placeholders are filled from metadata_columns so renaming a metadata column does not break this query."
+}

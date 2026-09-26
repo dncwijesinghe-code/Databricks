@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "_about": "Which table each feed writes to. The catalog and schema come from the named destination connection in connection_config.json, so feeds landing in the same place do not repeat it. Every feed key here must also exist in source_config.json.",
+
+  "defaults": {
+    "connection": "bronze_dev",
+
+    "table": null,
+    "append_filename_suffix": false,
+    "load_type": "append",
+    "create_if_not_exists": true,
+
+    "_load_type_note": "What a run does to the table. 'full' deletes and loads, replacing the contents each run. 'append' adds rows, so history accumulates and re-running the same file duplicates it. 'delta' upserts on the primary key, which makes a re-run idempotent and needs source.primary_key set with uniqueness enforced. The behaviour behind each name is defined in runtime_config.load_types.",
+    "add_ingestion_metadata": true,
+    "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
+    "partition_by": [],
+    "table_properties": {
+      "delta.autoOptimize.optimizeWrite": "true"
+    },
+    "table_schema": null,
+
+    "_connection_note": "'connection' names an entry under connection_config.destinations, which supplies catalog and schema. A feed may still set catalog or schema directly to override just that part.",
+    "_table_note": "'table' is the bare table name and is required per feed. Set append_filename_suffix true for one table per file, named <table>_<filename slug>.",
+    "_schema_note": "'table_schema' null means derive it from the feed's source columns plus the selected metadata_columns, so there is no second copy of the schema to drift out of step.",
+    "_metadata_note": "metadata_columns selects by name from runtime_config.json's catalogue, which declares each column's type and the value it carries."
+  },
+
+  "feeds": {
+    "dataset1": {
+      "description": "Dataset1.csv -> Table01 in the bronze_dev destination.",
+      "table": "Table01"
+    },
+
+    "file_daily": {
+      "description": "Every date-stamped drop accumulates in Table02 in the bronze_dev destination.",
+      "table": "Table02",
+      "load_type": "append",
+      "_load_note": "Append is deliberate here: each daily drop is a new set of rows to keep, and _batch_id tells the drops apart. Note this makes a same-day re-run additive rather than idempotent - use 'delta' if a re-run should update in place instead, though AAA repeats across drops so it is not a usable key across the whole table."
+    }
+  }
+}
