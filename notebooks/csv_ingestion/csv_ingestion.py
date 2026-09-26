@@ -7,14 +7,20 @@
 # MAGIC
 # MAGIC | File | Changes when | Holds |
 # MAGIC |---|---|---|
-# MAGIC | `ingestion_config.json` | a feed is added or changed | `connection`, `defaults`, `feeds` |
+# MAGIC | `source_config.json` | a feed is added or changed | `connection`, source `defaults`, per-feed file selection, columns, primary key |
+# MAGIC | `destination_config.json` | a feed is added or changed | destination `defaults`, per-feed catalog, schema, table, write mode |
 # MAGIC | `runtime_config.json` | rarely | Drive API details, parser fallbacks, metadata catalogue, writer options, naming rules |
 # MAGIC
 # MAGIC ### Adding an ingestion
 # MAGIC
-# MAGIC Add a block under `feeds` with its `folder_id`, how to pick the file, the `columns`, and the
-# MAGIC destination `table`. Nothing in this notebook changes, and `runtime_config.json` does not
-# MAGIC either. Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
+# MAGIC Add a block under `feeds` in **both** `source_config.json` (folder, how to pick the file,
+# MAGIC `columns`) and `destination_config.json` (`table`), using the same feed key. Nothing in this
+# MAGIC notebook changes, and `runtime_config.json` does not either.
+# MAGIC
+# MAGIC The notebook warns when a feed key exists in one file but not the other, and fails with a
+# MAGIC message naming the missing side if the selected feed is half-defined.
+# MAGIC
+# MAGIC Merging is recursive, so a feed overriding `format.quote_char` inherits the rest of
 # MAGIC `format` untouched.
 # MAGIC
 # MAGIC ### Selecting the source file
@@ -77,7 +83,10 @@ RUNTIME = load_json(dbutils.widgets.get("runtime_config_file").strip())
 
 W = RUNTIME["widgets"]
 dbutils.widgets.text("feed", W["feed_default"], "Feed (key under 'feeds')")
-dbutils.widgets.text("config_file", W["config_file_default"], "Ingestion config file")
+dbutils.widgets.text("source_config_file", W["source_config_file_default"], "Source config file")
+dbutils.widgets.text(
+    "destination_config_file", W["destination_config_file_default"], "Destination config file"
+)
 dbutils.widgets.dropdown("dry_run", W["dry_run_default"], ["true", "false"], "Dry run (skip write)")
 
 FEED = dbutils.widgets.get("feed").strip()
@@ -109,19 +118,43 @@ def deep_merge(base, override):
     return merged
 
 
-config_path = dbutils.widgets.get("config_file").strip()
-raw = load_json(config_path)
+source_path = dbutils.widgets.get("source_config_file").strip()
+dest_path = dbutils.widgets.get("destination_config_file").strip()
 
-feeds = raw.get("feeds") or {}
-if FEED not in feeds:
-    raise ValueError("Unknown feed {!r}. Defined feeds: {}".format(FEED, sorted(feeds) or "none"))
+src_cfg = load_json(source_path)
+dst_cfg = load_json(dest_path)
 
-defaults = raw.get("defaults") or {}
-feed_cfg = feeds[FEED]
+src_feeds = src_cfg.get("feeds") or {}
+dst_feeds = dst_cfg.get("feeds") or {}
 
-connection = raw["connection"]
-source = deep_merge(defaults.get("source") or {}, feed_cfg.get("source"))
-destination = deep_merge(defaults.get("destination") or {}, feed_cfg.get("destination"))
+# Splitting source from destination means the two feed lists can drift apart. Report that
+# precisely, rather than letting a half-defined feed fail somewhere less obvious.
+only_source = sorted(set(src_feeds) - set(dst_feeds))
+only_dest = sorted(set(dst_feeds) - set(src_feeds))
+if only_source or only_dest:
+    print(
+        "WARNING: feeds defined on one side only - source-only {}, destination-only {}".format(
+            only_source or "none", only_dest or "none"
+        )
+    )
+
+if FEED not in src_feeds:
+    raise ValueError(
+        "Feed {!r} is not in {}. Defined there: {}".format(
+            FEED, os.path.basename(source_path), sorted(src_feeds) or "none"
+        )
+    )
+if FEED not in dst_feeds:
+    raise ValueError(
+        "Feed {!r} is in {} but not in {}. Defined there: {}".format(
+            FEED, os.path.basename(source_path), os.path.basename(dest_path),
+            sorted(dst_feeds) or "none",
+        )
+    )
+
+connection = src_cfg["connection"]
+source = deep_merge(src_cfg.get("defaults") or {}, src_feeds[FEED])
+destination = deep_merge(dst_cfg.get("defaults") or {}, dst_feeds[FEED])
 
 if not destination.get("table"):
     raise ValueError("Feed {!r} must set destination.table.".format(FEED))
@@ -137,10 +170,15 @@ api = deep_merge(DRIVE_CFG["fallbacks"], connection.get("api"))
 declared = source["columns"]
 declared_names = [c["name"] for c in declared]
 
-print("Runtime : {}".format(resolve_path(dbutils.widgets.get("runtime_config_file").strip())))
-print("Config  : {}".format(resolve_path(config_path)))
-print("Feed    : {}".format(FEED))
-print("Target  : {}.{}.{}".format(destination["catalog"], destination["schema"], destination["table"]))
+print("Runtime     : {}".format(resolve_path(dbutils.widgets.get("runtime_config_file").strip())))
+print("Source      : {}".format(resolve_path(source_path)))
+print("Destination : {}".format(resolve_path(dest_path)))
+print("Feed        : {}".format(FEED))
+print(
+    "Target      : {}.{}.{}".format(
+        destination["catalog"], destination["schema"], destination["table"]
+    )
+)
 
 # COMMAND ----------
 

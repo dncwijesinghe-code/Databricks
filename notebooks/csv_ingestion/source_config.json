@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "_about": "Where the data comes from and how to read it. 'connection' is the Google Drive connection shared by every feed, 'defaults' applies to all feeds, and each entry under 'feeds' overrides only what differs. Every feed key here must also exist in destination_config.json.",
+
+  "connection": {
+    "provider": "google_drive",
+    "auth": {
+      "method": "service_account",
+      "secret_scope": "gdrive",
+      "secret_key": "service_account_json",
+      "service_account_email": "databricksserviceaccount@databricksingestion-509802.iam.gserviceaccount.com",
+      "_note": "The key itself lives in the Databricks secret scope above and is never stored here. Share each Drive folder with service_account_email, or lookups return 404."
+    },
+    "api": {
+      "scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+      "timeout_seconds": 120,
+      "max_retries": 3,
+      "chunk_size_bytes": 10485760
+    }
+  },
+
+  "defaults": {
+    "_about": "Merged recursively into each feed, so a feed overriding format.quote_char inherits the rest of format. Anything omitted here falls back to runtime_config.json.",
+    "source_type": "csv",
+    "file": {
+      "file_id": "",
+      "file_name": "",
+      "folder_id": "",
+      "match": {
+        "enabled": false,
+        "pattern": "*.csv",
+        "strategy": "newest",
+        "recursive": false,
+        "min_modified_time": null
+      }
+    },
+    "format": {
+      "delimiter": ",",
+      "encoding": "utf-8",
+      "quote_char": "\"",
+      "escape_char": null,
+      "null_values": ["", "NA", "N/A", "NULL", "null"],
+      "trim_whitespace": true
+    },
+    "header": {
+      "has_header": true,
+      "header_row_number": 1,
+      "skip_rows_after_header": 0
+    },
+    "validation": {
+      "enforce_column_list": true,
+      "fail_on_missing_columns": true,
+      "fail_on_extra_columns": false,
+      "enforce_primary_key_unique": true,
+      "deduplicate_on_primary_key": false,
+      "fail_on_null_primary_key": true
+    }
+  },
+
+  "feeds": {
+    "dataset1": {
+      "description": "Dataset1.csv in a shared folder, resolved by exact name.",
+      "file": {
+        "file_name": "Dataset1.csv",
+        "folder_id": "1qsypOaPkJEy6QvrO21WPsi1xFhnxUW4r"
+      },
+      "columns": [
+        { "name": "AAA", "type": "bigint", "nullable": false },
+        { "name": "BBB", "type": "bigint", "nullable": true },
+        { "name": "CCC", "type": "bigint", "nullable": true }
+      ],
+      "primary_key": ["AAA"]
+    },
+
+    "file_daily": {
+      "description": "Date-stamped daily drop, e.g. file20260926.csv, selected by glob.",
+      "file": {
+        "folder_id": "1V6AmKhu4illJyUNXqcEeCE47gHQNj12O",
+        "match": {
+          "enabled": true,
+          "pattern": "file*.csv",
+          "strategy": "newest"
+        }
+      },
+      "format": {
+        "quote_char": "'",
+        "_quote_note": "This source quotes only its non-numeric field (DDD arrives as 'A'), as a QUOTE_NONNUMERIC-style export does. With the default double quote the apostrophes would be kept and DDD would store the literal 'A'."
+      },
+      "columns": [
+        { "name": "AAA", "type": "bigint", "nullable": false },
+        { "name": "BBB", "type": "bigint", "nullable": true },
+        { "name": "CCC", "type": "bigint", "nullable": true },
+        { "name": "DDD", "type": "string", "nullable": true }
+      ],
+      "primary_key": ["AAA"],
+      "_pk_note": "AAA is unique within one drop but repeats across drops, and all drops land in one table. The uniqueness check therefore validates each drop in isolation, not the table as a whole."
+    }
+  }
+}

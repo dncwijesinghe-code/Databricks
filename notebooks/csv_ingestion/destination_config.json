@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "_about": "Where the data lands. 'defaults' applies to all feeds; each entry under 'feeds' overrides only what differs. Every feed key here must also exist in source_config.json - the notebook checks both sides and names any feed present in one file but not the other.",
+
+  "defaults": {
+    "catalog": "dataplatform_dev",
+    "schema": "bronze_dev",
+    "table": null,
+    "append_filename_suffix": false,
+    "write_mode": "append",
+    "create_if_not_exists": true,
+    "add_ingestion_metadata": true,
+    "metadata_columns": ["_batch_id", "_ingested_at", "_source_file_name", "_source_file_id"],
+    "partition_by": [],
+    "table_properties": {
+      "delta.autoOptimize.optimizeWrite": "true"
+    },
+    "table_schema": null,
+
+    "_table_note": "'table' is the bare table name and is required per feed. Set append_filename_suffix true for one table per file, named <table>_<filename slug>.",
+    "_schema_note": "'table_schema' null means derive it from the feed's source columns plus the selected metadata_columns, so there is no second copy of the schema to drift out of step.",
+    "_metadata_note": "metadata_columns selects by name from runtime_config.json's catalogue, which declares each column's type and the value it carries."
+  },
+
+  "feeds": {
+    "dataset1": {
+      "description": "Dataset1.csv -> dataplatform_dev.bronze_dev.Table01",
+      "table": "Table01"
+    },
+
+    "file_daily": {
+      "description": "Every date-stamped drop accumulates in dataplatform_dev.bronze_dev.Table02.",
+      "table": "Table02",
+      "_write_note": "Append, so re-running on the same day adds a second batch rather than replacing it. _batch_id distinguishes them; switch write_mode to overwrite if a re-run should replace instead."
+    }
+  }
+}
